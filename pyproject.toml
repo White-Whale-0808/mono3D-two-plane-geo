@@ -1,7 +1,10 @@
 [project]
-name = "mono3d-occlusion-based"
+name = "mono3d-two-plane-ego"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "torch>=2.10.0",
+    "torchvision>=0.25.0",
+]
