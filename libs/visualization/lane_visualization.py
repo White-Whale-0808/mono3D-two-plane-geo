@@ -1,8 +1,9 @@
 import cv2
 import numpy as np
 
-def draw_lane_lines(image_np, left_lines, right_lines, save_path):
-    image_drawn_lane = image_np.copy()  # Python is call-by-reference. 
+def draw_lane_lines(resized_image, left_lines, right_lines, save_path):
+    image = np.array(resized_image)
+    image_drawn_lane = image.copy()  # Python is call-by-reference. 
 
     for x1, y1, x2, y2 in left_lines:
         cv2.line(image_drawn_lane, (x1, y1), (x2, y2), (255, 0, 0), 2, cv2.LINE_AA)  # cv2.LINE_AA for anti-aliased lines
@@ -11,10 +12,10 @@ def draw_lane_lines(image_np, left_lines, right_lines, save_path):
         cv2.line(image_drawn_lane, (x1, y1), (x2, y2), (0, 255, 0), 2, cv2.LINE_AA)
 
     cv2.imwrite(save_path, cv2.cvtColor(image_drawn_lane, cv2.COLOR_RGB2BGR))
-    return image_drawn_lane
 
-def create_overlay(image_np, pred_mask, alpha, save_path):
-    overlay = image_np.astype(np.float32).copy()  
+def create_overlay(resized_image, pred_mask, alpha, save_path):
+    image = np.array(resized_image)
+    overlay = image.astype(np.float32).copy()  
 
     # Alpha blending. We only apply the red color to the road area, and keep the non-road area unchanged.
     overlay[pred_mask == 1] = (
@@ -25,4 +26,3 @@ def create_overlay(image_np, pred_mask, alpha, save_path):
     overlay = np.clip(overlay, 0, 255).astype(np.uint8)  # Ensure pixel values are valid after blending
     
     cv2.imwrite(save_path, cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
-    return overlay
