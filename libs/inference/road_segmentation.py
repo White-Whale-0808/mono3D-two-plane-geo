@@ -1,5 +1,3 @@
-from xml.parsers.expat import model
-
 from PIL import Image
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode

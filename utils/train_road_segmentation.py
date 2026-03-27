@@ -1,15 +1,28 @@
 import torch
+import yaml
 from libs.dataset.cityscape_dataset import CityscapeDataset
 from torch.utils.data import DataLoader
-from libs.model.restnet101 import build_model
+from libs.model.restnet101 import build_train_model
 import torch.nn as nn
 import torch.optim as optim
 from libs.engine.train import train_one_epoch
 from libs.engine.validate import validate_one_epoch
 
-BATCH_SIZE = 4
-EPOCHS = 1
-LEARNING_RATE = 0.001
+with open("config/train_road_segmentation.yaml", "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+train_image_dir = config["dataset"]["train"]["image_dir"]
+train_label_dir = config["dataset"]["train"]["label_dir"]
+val_image_dir = config["dataset"]["val"]["image_dir"]
+val_label_dir = config["dataset"]["val"]["label_dir"]
+
+batch_size = config["training"]["batch_size"]
+epochs = config["training"]["epochs"]
+lr = config["training"]["learning_rate"]
+shuffle = config["training"]["shuffle"]
+
+device = config["model"]["device"]
+save_path = config["checkpoint"]["save_best_path"]
 
 def save_checkpoint(model, optimizer, epoch, path):
     torch.save({
@@ -19,36 +32,32 @@ def save_checkpoint(model, optimizer, epoch, path):
     }, path)
 
 def main():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
 
-    # Dataset
-    train_dataset = CityscapeDataset("libs/dataset/cityscape/leftImg8bit/train", "libs/dataset/cityscape/gtFine/train")
-    val_dataset = CityscapeDataset("libs/dataset/cityscape/leftImg8bit/val", "libs/dataset/cityscape/gtFine/val")
+    train_dataset = CityscapeDataset(train_image_dir, train_label_dir)
+    val_dataset = CityscapeDataset(val_image_dir, val_label_dir)
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size)
 
-    # Model
-    model = build_model(device)
+    model = build_train_model(device)
 
-    # Loss function and optimizer
-    loss_fn = nn.BCEWithLogitsLoss()  # The output of the model is between [-inf, +inf], so we use BCEWithLogitsLoss which combines a sigmoid layer([0, 1]) and the BCELoss.
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    loss_fn = nn.BCEWithLogitsLoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr)
 
     best_iou = 0.0
 
-    # Training loop
-    for epoch in range(EPOCHS):
+    for epoch in range(epochs):
         train_one_epoch(model, train_loader, loss_fn, optimizer, device)
-        print(f"Training for epoch {epoch+1}/{EPOCHS} completed.")
+        print(f"Training for epoch {epoch+1}/{epochs} completed.")
 
         val_iou = validate_one_epoch(model, val_loader, loss_fn, device)
-        print(f"Validation for epoch {epoch+1}/{EPOCHS} completed.")
+        print(f"Validation for epoch {epoch+1}/{epochs} completed.")
 
         if val_iou > best_iou:
             best_iou = val_iou
-            save_checkpoint(model, optimizer, epoch, "models/road_segmentation_best.pth")
+            print(f"New best IoU: {best_iou:.4f}. Saving checkpoint.")
+            save_checkpoint(model, optimizer, epoch, save_path)
+
 
 if __name__ == "__main__":
     main()

@@ -7,7 +7,7 @@ from libs.visualization.lane_visualization import draw_lane_lines
 from libs.visualization.lane_visualization import create_overlay
 import yaml
 
-with open("config.yaml", "r", encoding="utf-8") as f:
+with open("config/inference_road_lane_segmentation.yaml", "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
 
 device = config["model"]["device"]
@@ -25,7 +25,7 @@ def main():
     resized_image, pred_mask = predict_road(model, image_path, device, resize_size, threshold)
     masked_road = apply_road_mask(resized_image, pred_mask)
 
-    segments, _ = detect_lines_with_elsed(masked_road)
+    segments = detect_lines_with_elsed(masked_road)
     left_lines, right_lines = split_left_right_lines(segments, resized_image.width, min_slope)
 
     draw_lane_save_path = save_path.replace(".png", "_lanes.png")
