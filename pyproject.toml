@@ -3,10 +3,16 @@ name = "mono3d-two-plane-ego"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
     "matplotlib>=3.10.8",
+    "numpy>=2.2.6",
+    "opencv-python>=4.13.0.92",
+    "pyelsed",
     "pyyaml>=6.0.3",
     "torch>=2.10.0",
     "torchvision>=0.25.0",
 ]
+
+[tool.uv.sources]
+pyelsed = { git = "https://github.com/iago-suarez/ELSED.git" }
