@@ -2,7 +2,7 @@ import torch
 import yaml
 from libs.dataset.cityscape_dataset import CityscapeDataset
 from torch.utils.data import DataLoader
-from libs.model.restnet101 import build_train_model
+from libs.model.resnet101 import build_train_model
 import torch.nn as nn
 import torch.optim as optim
 from libs.engine.train import train_one_epoch
@@ -20,6 +20,7 @@ batch_size = config["training"]["batch_size"]
 epochs = config["training"]["epochs"]
 lr = config["training"]["learning_rate"]
 shuffle = config["training"]["shuffle"]
+aux_loss_weight = config["training"]["aux_loss_weight"]
 
 device = config["model"]["device"]
 save_path = config["checkpoint"]["save_best_path"]
@@ -47,7 +48,7 @@ def main():
     best_iou = 0.0
 
     for epoch in range(epochs):
-        train_one_epoch(model, train_loader, loss_fn, optimizer, device)
+        train_one_epoch(model, train_loader, aux_loss_weight, loss_fn, optimizer, device)
         print(f"Training for epoch {epoch+1}/{epochs} completed.")
 
         val_iou = validate_one_epoch(model, val_loader, loss_fn, device)
