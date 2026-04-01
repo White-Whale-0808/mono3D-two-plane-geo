@@ -1,4 +1,4 @@
-from libs.model.restnet101 import build_inference_model
+from libs.model.resnet101 import build_inference_model
 from libs.inference.road_segmentation import predict_road
 from libs.inference.road_segmentation import apply_road_mask
 from libs.inference.lane_segmentation import detect_lines_with_elsed

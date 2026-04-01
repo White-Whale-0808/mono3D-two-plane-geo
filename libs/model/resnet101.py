@@ -4,7 +4,7 @@ import torch
 
 def build_train_model(device):
     weights = DeepLabV3_ResNet101_Weights.DEFAULT
-    model = deeplabv3_resnet101(weights=weights, aux_loss=False)
+    model = deeplabv3_resnet101(weights=weights, aux_loss=True)
 
     model.classifier[4] = nn.Conv2d(  # Replace the last layer of the classifier for binary segmentation
         in_channels= 256,
@@ -12,12 +12,24 @@ def build_train_model(device):
         kernel_size= 1
     )
 
+    model.aux_classifier[4] = nn.Conv2d(
+        in_channels=256,
+        out_channels=1,
+        kernel_size=1
+    )
+
     model.to(device)
     return model
 
 def build_inference_model(device, model_path):
-    model = deeplabv3_resnet101(weights=None, aux_loss=False)
+    model = deeplabv3_resnet101(weights=None, aux_loss=True)
     model.classifier[4] = nn.Conv2d(
+        in_channels=256,
+        out_channels=1,
+        kernel_size=1
+    )
+
+    model.aux_classifier[4] = nn.Conv2d(
         in_channels=256,
         out_channels=1,
         kernel_size=1
