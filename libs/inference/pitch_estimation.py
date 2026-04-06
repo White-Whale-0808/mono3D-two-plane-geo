@@ -15,9 +15,9 @@ def estimate_pitch_from_widths(widths, f_x, f_y, image_height, w_real):
     center_y = image_height / 2
     Y_3d = -depths * (widths[:, 0] - center_y) / f_y
 
-    # OLS (sensitive to outliers): coeffs = np.polyfit(depths, Y_3d, deg=1); slope = coeffs[0]
-    # Theil-Sen estimator: median-based slope, robust to outlier width samples
-    result = theilslopes(Y_3d, depths)
+    # coeffs = np.polyfit(depths, Y_3d, deg=1)
+    # slope = coeffs[0]
+    result = theilslopes(Y_3d, depths)  # Use Theil-Sen estimator to be more robust to outliers
     pitch_rad = np.arctan(result.slope)
     pitch_deg = np.degrees(pitch_rad)
     return pitch_deg
