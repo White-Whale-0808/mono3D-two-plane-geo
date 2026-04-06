@@ -5,7 +5,7 @@
 # if __name__ == "__main__":
 #     main()
 # main.py
-from utils.train_road_segmentation import main
+from utils.inference_road_lane_segmentation import main
 
 if __name__ == "__main__":
     main()
