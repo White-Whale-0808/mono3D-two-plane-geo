@@ -22,7 +22,7 @@ And finally sort the line segments based on their x-coordinate at the bottom of 
 Output: two lists of inner lane segments
 """
 
-def split_left_right_lines(segments, image_width, min_slope, img_height, lane_band_tolerance=60):
+def split_left_right_lines(segments, image_width, min_slope, img_height, lane_band_tolerance):
 
     left_segments = []
     right_segments = []
