@@ -1,19 +1,33 @@
 model:
-  device: "cuda"
+  device: "cpu"
   model_path: "models/road_segmentation_best.pth"
 
 input:
-  image_path: "test.png"
+  image_path: "inference_datasets/solid_line/up_hile/pitch_0_215.png"
   resize_size:
     - 512
     - 1024
 
 road_segmentation:
   threshold: 0.5
+  # mask_erosion_kernel: 3  # Erode mask inward by this many pixels to eliminate edge artifacts
 
 lane_segmentation:
   min_slope: 0.3
+  min_segment_length: 15  # Discard ELSED segments shorter than this (pixels)
+  # roi: 0.2
+  lane_band_tolerance: 60  # Max x_at_bottom deviation (pixels) from innermost segment to still be considered the same lane marking
 
+lane_fitting:
+  extra_points_per_segment: 10
+  num_bands: 3  # Number of horizontal bands for piecewise linear fitting
+  num_samples: 20  # Number of y-values to sample for lane width computation
+  # ransac_residual_threshold: 5.0  # Max pixel distance from fitted line to be considered an inlier
+
+pitch_estimation:
+  f_x: 512  # Focal length calculated from camera intrinsics and resize dimensions
+  f_y: 455
+  w_real: 3.5  # Get from carla 
 visualization:
   alpha: 0.4
   save_path: "outputs/result.png"
