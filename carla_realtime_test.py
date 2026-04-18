@@ -8,6 +8,28 @@ carla_realtime_test.py
 注意：執行前請確認 CARLA 伺服器已啟動，且已安裝 carla Python 套件（版本需與伺服器一致）。
 """
 
+import os
+import pathlib
+
+def _load_dotenv() -> None:
+    # 從專案根目錄的 .env 讀取環境變數（不覆蓋已存在的值）
+    env_file = pathlib.Path(__file__).parent / ".env"
+    if not env_file.exists():
+        return
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, _, val = line.partition("=")
+            os.environ.setdefault(key.strip(), val.strip())
+
+_load_dotenv()
+
+# Windows：手動將 OpenCV DLL 資料夾加入搜尋路徑（Python 3.8+ 需要，必須在 import cv2 前執行）
+_opencv_bin = os.environ.get("OPENCV_BIN_PATH", "")
+if _opencv_bin and os.path.exists(_opencv_bin):
+    os.add_dll_directory(_opencv_bin)
+    os.environ["PATH"] = _opencv_bin + os.pathsep + os.environ["PATH"]
+
 import argparse
 import queue
 import sys
@@ -51,8 +73,10 @@ def parse_args() -> argparse.Namespace:
                         help="CARLA 伺服器埠號（預設：2000）")
     parser.add_argument("--config-path", default="config/inference_road_lane_segmentation.yaml",
                         help="推斷設定檔路徑（預設：config/inference_road_lane_segmentation.yaml）")
-    parser.add_argument("--timeout",     type=float, default=10.0,
-                        help="CARLA 連線逾時秒數（預設：10）")
+    parser.add_argument("--timeout",     type=float, default=20.0,
+                        help="CARLA 連線逾時秒數（預設：20）")
+    parser.add_argument("--map",         default="Town03",
+                        help="CARLA 地圖名稱（預設：Town03）")
     return parser.parse_args()
 
 
@@ -73,12 +97,15 @@ def select_device(cfg_device: str) -> torch.device:
 
 
 def setup_carla(
-    host: str, port: int, timeout: float
+    host: str, port: int, timeout: float, map_name: str = "Town03"
 ) -> tuple[carla.Client, carla.World, carla.Vehicle, carla.Sensor]:
     # 連接 CARLA 伺服器
     client = carla.Client(host, port)
     client.set_timeout(timeout)
-    world = client.get_world()
+
+    # 切換至指定地圖（若已在該地圖則 CARLA 會快速跳過載入）
+    print(f"[初始化] 載入地圖：{map_name} ...")
+    world = client.load_world(map_name)
 
     bp_lib = world.get_blueprint_library()
 
@@ -247,7 +274,7 @@ def main() -> None:
     model = build_inference_model(device, cfg["model"]["model_path"])
     print("[初始化] 模型載入完成")
 
-    client, world, vehicle, camera = setup_carla(args.host, args.port, args.timeout)
+    client, world, vehicle, camera = setup_carla(args.host, args.port, args.timeout, args.map)
     print(f"[初始化] CARLA 連線成功，車輛已生成於 {vehicle.get_transform().location}")
 
     camera.listen(_camera_callback)

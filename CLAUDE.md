@@ -4,16 +4,35 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-**Package manager:** `uv`
+**Package manager:** `uv` · **Python:** 3.12 (locked via `.python-version`)
 
 ```bash
 uv sync                                    # Install all dependencies
 python main.py                             # Run inference pipeline
 python utils/train_road_segmentation.py   # Run training
 python utils/plot_frameId_and_pitch.py    # Plot frame metadata
+python carla_realtime_test.py             # CARLA real-time pitch estimation
+python scripts/setup_elsed.py             # One-time: clone & patch pyelsed for Python 3.12
 ```
 
 No lint, format, or test commands are configured.
+
+### First-time setup (new machine)
+
+```bash
+# 1. Patch and build pyelsed locally (required for Python 3.12 on Windows)
+python scripts/setup_elsed.py
+
+# 2. Copy env template and fill in machine-specific paths
+cp .env.example .env
+
+# 3. Install CARLA wheel (path set in .env)
+#    PowerShell: uv pip install $env:CARLA_WHL_PATH
+#    bash:       uv pip install $CARLA_WHL_PATH
+
+# 4. Install all other dependencies
+uv sync
+```
 
 ## Architecture
 
@@ -77,12 +96,29 @@ Configured via `config/train_road_segmentation.yaml`.
 | `libs/dataset/cityscape_dataset.py` | Dataset loader + `ToRoadMask` transform |
 | `libs/engine/train.py` / `validate.py` | Per-epoch training and IoU validation loops |
 | `libs/inference/road_segmentation.py` | Inference-time road masking |
+| `libs/inference/carla_road_segmentation.py` | `predict_road_from_pil()` — accepts PIL Image directly (used by CARLA script) |
 | `libs/inference/lane_segmentation.py` | ELSED detection + slope/position lane classification |
 | `libs/inference/lane_fitting.py` | Point collection, piecewise linear fitting, lane width computation |
 | `libs/inference/pitch_estimation.py` | Pinhole-model depth + Theil-Sen pitch estimation |
 | `libs/metric/iou.py` | IoU computation used during validation |
-| `libs/visualization/` | Loss curve, lane overlay, and piecewise-fit plotting |
+| `libs/visualization/lane_visualization.py` | Loss curve, lane overlay, and piecewise-fit plotting (file output) |
+| `libs/visualization/carla_visualization.py` | `render_piecewise_fits_to_array()` — returns BGR ndarray for `cv2.imshow` |
 | `config/` | YAML configs for train and inference (paths, hyperparameters, device) |
 | `outputs/` | Inference result images |
 | `results/` | Training loss plots |
 | `models/` | Saved model checkpoints |
+| `carla_realtime_test.py` | Real-time CARLA test: spawns vehicle, runs 5-stage pipeline, displays pitch overlay |
+| `scripts/setup_elsed.py` | One-time setup: clones pyelsed and applies Python 3.12 / Windows patches |
+| `.env.example` | Template for machine-specific paths (`CARLA_WHL_PATH`, `OPENCV_BIN_PATH`) |
+
+### CARLA camera parameters
+
+`carla_realtime_test.py` uses `image_size_x=1024`, `image_size_y=512`, `fov=90°`, which gives `f_x = f_y = 512` (square pixels). The config value `f_y=455` (from a real camera) is overridden at runtime to match CARLA's pinhole model.
+
+### pyelsed build notes (Windows + Python 3.12)
+
+`scripts/setup_elsed.py` applies three patches to the cloned source before `uv sync` builds it:
+
+1. `CMakeLists.txt` line 1 → `cmake_minimum_required(VERSION 3.5)`
+2. `src/EdgeDrawer.h` top → `#define _USE_MATH_DEFINES` (fixes missing `M_PI` on MSVC)
+3. `pybind11` submodule → checkout `v2.13.6` (fixes Python 3.12 C-API incompatibility)
