@@ -25,9 +25,11 @@ def _load_dotenv() -> None:
 _load_dotenv()
 
 # Windows：手動將 OpenCV DLL 資料夾加入搜尋路徑（Python 3.8+ 需要，必須在 import cv2 前執行）
+# os.add_dll_directory 僅存在於 Windows，Linux/macOS 不需要此步驟
 _opencv_bin = os.environ.get("OPENCV_BIN_PATH", "")
 if _opencv_bin and os.path.exists(_opencv_bin):
-    os.add_dll_directory(_opencv_bin)
+    if hasattr(os, "add_dll_directory"):
+        os.add_dll_directory(_opencv_bin)
     os.environ["PATH"] = _opencv_bin + os.pathsep + os.environ["PATH"]
 
 import argparse
