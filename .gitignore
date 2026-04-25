@@ -19,3 +19,4 @@ outputs/
 
 # Model checkpoints
 models/
+pidnet_pretrained_model/PIDNet_L_Cityscapes_test.pt
