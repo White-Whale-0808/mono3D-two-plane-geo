@@ -8,29 +8,8 @@ carla_realtime_test.py
 注意：執行前請確認 CARLA 伺服器已啟動，且已安裝 carla Python 套件（版本需與伺服器一致）。
 """
 
-import os
-import pathlib
-
-def _load_dotenv() -> None:
-    # 從專案根目錄的 .env 讀取環境變數（不覆蓋已存在的值）
-    env_file = pathlib.Path(__file__).parent / ".env"
-    if not env_file.exists():
-        return
-    for line in env_file.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            key, _, val = line.partition("=")
-            os.environ.setdefault(key.strip(), val.strip())
-
-_load_dotenv()
-
-# Windows：手動將 OpenCV DLL 資料夾加入搜尋路徑（Python 3.8+ 需要，必須在 import cv2 前執行）
-# os.add_dll_directory 僅存在於 Windows，Linux/macOS 不需要此步驟
-_opencv_bin = os.environ.get("OPENCV_BIN_PATH", "")
-if _opencv_bin and os.path.exists(_opencv_bin):
-    if hasattr(os, "add_dll_directory"):
-        os.add_dll_directory(_opencv_bin)
-    os.environ["PATH"] = _opencv_bin + os.pathsep + os.environ["PATH"]
+from utils.env_setup import setup_env
+setup_env()
 
 import argparse
 import queue
