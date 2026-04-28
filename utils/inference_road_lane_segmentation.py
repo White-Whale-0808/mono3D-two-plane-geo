@@ -1,9 +1,9 @@
 import time
 import yaml
-from libs.model.resnet101 import build_inference_model
-from libs.inference.road_segmentation import predict_road, apply_road_mask
+# from libs.model.resnet101 import build_inference_model
+from libs.inference.road_segmentation import load_pidnet, predict_road, apply_road_mask
 from libs.inference.lane_segmentation import detect_lines_with_elsed, split_left_right_lines
-from libs.visualization.lane_visualization import draw_lane_lines, create_overlay
+from libs.visualization.lane_visualization import draw_lane_lines, create_overlay, draw_line_segments
 # from libs.inference.lane_segmentation import cluster_left_right, get_best_seed
 # from libs.visualization.lane_visualization import draw_kmeans_clusters, draw_lane_seed
 from libs.inference.lane_fitting import collect_points_from_segments, piecewise_linear_fit, compute_lane_widths
@@ -15,10 +15,11 @@ with open("config/inference_road_lane_segmentation.yaml", "r", encoding="utf-8")
     config = yaml.safe_load(f)
 
 device = config["model"]["device"]
-model_path = config["model"]["model_path"]
+model_name = config["model"]["model_name"]
+weight_path = config["model"]["weight_path"]
 image_path = config["input"]["image_path"]
 resize_size = tuple(config["input"]["resize_size"])
-threshold = config["road_segmentation"]["threshold"]
+# threshold = config["road_segmentation"]["threshold"]
 # mask_erosion_kernel = config["road_segmentation"]["mask_erosion_kernel"]
 min_slope = config["lane_segmentation"]["min_slope"]
 min_segment_length = config["lane_segmentation"]["min_segment_length"]
@@ -35,20 +36,24 @@ f_y = config["pitch_estimation"]["f_y"]
 w_real = config["pitch_estimation"]["w_real"]
 
 def main():
-    model = build_inference_model(device, model_path)
+    model = load_pidnet(model_name, weight_path, device)
     t0 = time.perf_counter()
     
-    resized_image, pred_mask = predict_road(model, image_path, device, resize_size, threshold)
+    resized_image, pred_mask = predict_road(model, image_path, device, resize_size)
     masked_road = apply_road_mask(resized_image, pred_mask)
     t1 = time.perf_counter()
 
     segments = detect_lines_with_elsed(masked_road, min_segment_length)
     t2 = time.perf_counter()
 
-    inner_left, inner_right = split_left_right_lines(segments, resized_image.width, min_slope, resized_image.height, lane_band_tolerance)
+    # inner_left, inner_right = split_left_right_lines(segments, resized_image.width, min_slope, resized_image.height, lane_band_tolerance, resized_image)
     # left_seed = get_best_seed(left_lines, True, resized_image.height)
     # right_seed = get_best_seed(right_lines, False, resized_image.height)
     # left_clus, right_clus = cluster_left_right(left_lines, right_lines)
+    inner_left, inner_right = split_left_right_lines(
+        segments, resized_image.width, min_slope, resized_image.height,
+        lane_band_tolerance, resized_image=resized_image
+    )
     t3 = time.perf_counter()
 
     left_points = collect_points_from_segments(inner_left, extra_points_per_segment)
@@ -63,13 +68,15 @@ def main():
     t5 = time.perf_counter()
 
     print(f"road segmentation:   {(t1-t0)*1000:.1f} ms")
-    print(f"line detection:      {(t2-t1)*1000:.1f} ms")
+    print(f"line segmentation:      {(t2-t1)*1000:.1f} ms")
     print(f"lane classification: {(t3-t2)*1000:.1f} ms")
     print(f"lane fitting:        {(t4-t3)*1000:.1f} ms")
     print(f"pitch estimation:    {(t5-t4)*1000:.1f} ms")
 
     overlay_save_path = save_path.replace(".png", "_overlay.png")
     create_overlay(resized_image, pred_mask, alpha, overlay_save_path)
+    draw_line_save_path = save_path.replace(".png", "_line_segments.png")
+    draw_line_segments(resized_image, segments, draw_line_save_path)
     draw_lane_save_path = save_path.replace(".png", "_lanes.png")
     draw_lane_lines(resized_image, inner_left, inner_right, draw_lane_save_path)
     # draw_lane_seed_save_path = save_path.replace(".png", "_lane_seeds.png")
