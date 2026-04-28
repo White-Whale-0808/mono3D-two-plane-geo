@@ -4,16 +4,74 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-**Package manager:** `uv`
+**Package manager:** `uv` · **Python:** 3.12 (locked via `.python-version`)
 
 ```bash
-uv sync                                    # Install all dependencies
-python main.py                             # Run inference pipeline
-python utils/train_road_segmentation.py   # Run training
-python utils/plot_frameId_and_pitch.py    # Plot frame metadata
+uv sync                                         # Install all dependencies
+uv run python main.py                           # Run inference pipeline
+uv run python utils/train_road_segmentation.py  # Run training
+uv run python utils/plot_frameId_and_pitch.py   # Plot frame metadata
+uv run python carla_realtime_test.py            # CARLA real-time pitch estimation
+python scripts/setup_elsed.py                   # One-time: clone & patch pyelsed (uses stdlib only)
 ```
 
+> Always use `uv run python` (not bare `python`) to run scripts — this ensures the `.venv` managed by uv is used. `scripts/setup_elsed.py` is the only exception because it runs before the venv exists and only uses the standard library.
+
 No lint, format, or test commands are configured.
+
+### First-time setup (new machine)
+
+#### Windows (PowerShell)
+
+```powershell
+# 1. Copy env template and fill in machine-specific paths FIRST
+#    Required before uv sync — the build needs OPENCV_DIR at compile time
+Copy-Item .env.example .env
+#    Edit .env and set:
+#      CARLA_WHL_PATH  — path to carla-*.whl
+#      OPENCV_BIN_PATH — e.g. C:/path/to/opencv/build/x64/vc16/bin
+#      OPENCV_DIR      — e.g. C:/path/to/opencv/build  (contains OpenCVConfig.cmake)
+
+# 2. Clone and patch pyelsed source (Python 3.12 + MSVC compatibility)
+python scripts/setup_elsed.py
+
+# 3. Build and install all dependencies
+#    uv sync must have OPENCV_DIR set so CMake can find OpenCV headers
+$env:OpenCV_DIR = (Select-String -Path .env -Pattern '^OPENCV_DIR=(.+)' |
+    ForEach-Object { $_.Matches[0].Groups[1].Value })
+uv sync
+
+# 4. Install CARLA wheel (not on PyPI, must be installed separately)
+$env:CARLA_WHL_PATH = (Select-String -Path .env -Pattern '^CARLA_WHL_PATH=(.+)' |
+    ForEach-Object { $_.Matches[0].Groups[1].Value })
+uv pip install $env:CARLA_WHL_PATH
+```
+
+#### Linux / macOS
+
+```bash
+# 1. Install OpenCV C++ dev package (needed to build pyelsed)
+#    Ubuntu/Debian: sudo apt install libopencv-dev
+#    macOS:         brew install opencv
+
+# 2. Copy env template (only CARLA_WHL_PATH is required on Linux)
+cp .env.example .env
+
+# 3. Clone and patch pyelsed source
+python scripts/setup_elsed.py
+
+# 4. Build and install all dependencies
+uv sync
+
+# 5. Install CARLA wheel
+uv pip install $CARLA_WHL_PATH
+```
+
+#### Why the order matters
+
+- `.env` must be copied **before** `uv sync`: the pyelsed build reads `OPENCV_DIR` from the environment to locate OpenCV headers.
+- `setup_elsed.py` must run **before** `uv sync`: it clones and patches the `elsed_src/` directory that uv builds as a local package.
+- CARLA wheel is installed **after** `uv sync`: it is not on PyPI and must be added manually.
 
 ## Architecture
 
@@ -77,12 +135,34 @@ Configured via `config/train_road_segmentation.yaml`.
 | `libs/dataset/cityscape_dataset.py` | Dataset loader + `ToRoadMask` transform |
 | `libs/engine/train.py` / `validate.py` | Per-epoch training and IoU validation loops |
 | `libs/inference/road_segmentation.py` | Inference-time road masking |
+| `libs/inference/carla_road_segmentation.py` | `predict_road_from_pil()` — accepts PIL Image directly (used by CARLA script) |
 | `libs/inference/lane_segmentation.py` | ELSED detection + slope/position lane classification |
 | `libs/inference/lane_fitting.py` | Point collection, piecewise linear fitting, lane width computation |
 | `libs/inference/pitch_estimation.py` | Pinhole-model depth + Theil-Sen pitch estimation |
 | `libs/metric/iou.py` | IoU computation used during validation |
-| `libs/visualization/` | Loss curve, lane overlay, and piecewise-fit plotting |
+| `libs/visualization/lane_visualization.py` | Loss curve, lane overlay, and piecewise-fit plotting (file output) |
+| `libs/visualization/carla_visualization.py` | `render_piecewise_fits_to_array()` — returns BGR ndarray for `cv2.imshow` |
 | `config/` | YAML configs for train and inference (paths, hyperparameters, device) |
 | `outputs/` | Inference result images |
 | `results/` | Training loss plots |
 | `models/` | Saved model checkpoints |
+| `utils/env_setup.py` | Shared startup helper: loads `.env` and registers OpenCV DLL path on Windows |
+| `carla_realtime_test.py` | Real-time CARLA test: spawns vehicle, runs 5-stage pipeline, displays pitch overlay |
+| `scripts/setup_elsed.py` | One-time setup: clones pyelsed and applies Python 3.12 / Windows patches |
+| `.env.example` | Template for machine-specific paths (`CARLA_WHL_PATH`, `OPENCV_BIN_PATH`, `OPENCV_DIR`) |
+
+### CARLA camera parameters
+
+`carla_realtime_test.py` uses `image_size_x=1024`, `image_size_y=512`, `fov=90°`, which gives `f_x = f_y = 512` (square pixels). The config value `f_y=455` (from a real camera) is overridden at runtime to match CARLA's pinhole model.
+
+### pyelsed build notes (Windows + Python 3.12)
+
+`scripts/setup_elsed.py` applies five patches to the cloned source before `uv sync` builds it:
+
+1. `CMakeLists.txt` line 1 → `cmake_minimum_required(VERSION 3.5)`
+2. `CMakeLists.txt` — injects `add_compile_definitions(_USE_MATH_DEFINES)` inside an `if(MSVC)` block (fixes `M_PI` / `M_PI_2` undefined across all `.cpp` files on MSVC)
+3. `src/EdgeDrawer.h` top → `#define _USE_MATH_DEFINES` (belt-and-suspenders for older CMake flows)
+4. `setup.py` — injects code to read `OpenCV_DIR` / `OPENCV_DIR` env var and pass it as `-DOpenCV_DIR` to CMake (needed because `opencv-python` on PyPI ships only Python bindings, not C++ headers or `OpenCVConfig.cmake`)
+5. `pybind11` submodule → checkout `v2.13.6` (fixes Python 3.12 C-API incompatibility)
+
+Set `OPENCV_DIR` in `.env` to the directory containing `OpenCVConfig.cmake` (e.g. `C:/path/to/opencv/build`). Not needed on macOS/Linux where `brew`/`apt` installs headers to a system path CMake finds automatically.

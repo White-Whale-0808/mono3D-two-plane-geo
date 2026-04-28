@@ -19,4 +19,10 @@ outputs/
 
 # Model checkpoints
 models/
+
+# 機器特定環境設定（複製 .env.example 並填入本機路徑）
+.env
+
+# 本機修補版 elsed 原始碼（需執行 python scripts/setup_elsed.py 產生）
+elsed_src/
 pidnet_pretrained_model/PIDNet_L_Cityscapes_test.pt

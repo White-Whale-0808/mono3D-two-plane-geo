@@ -3,8 +3,9 @@ name = "mono3d-two-plane-ego"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = "==3.12.*"
 dependencies = [
+    "carla",
     "matplotlib>=3.10.8",
     "numpy>=2.2.6",
     "opencv-python>=4.13.0.92",
@@ -17,4 +18,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-pyelsed = { git = "https://github.com/iago-suarez/ELSED.git" }
+# elsed：使用本機修補版原始碼（需先執行 python scripts/setup_elsed.py）
+pyelsed = { path = "./elsed_src" }
+# carla：機器特定 .whl，路徑因機器而異，需手動安裝（見 .env.example）
+# 安裝指令：uv pip install $CARLA_WHL_PATH
