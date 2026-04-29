@@ -1,9 +1,9 @@
 """
-carla_realtime_test.py
+carla_module/realtime_test.py
 即時 CARLA 俯仰角估計測試腳本
 
 使用方式：
-    python carla_realtime_test.py [--host HOST] [--port PORT] [--config-path PATH] [--timeout SEC]
+    python carla_module/realtime_test.py [--host HOST] [--port PORT] [--config-path PATH] [--timeout SEC]
 
 注意：執行前請確認 CARLA 伺服器已啟動，且已安裝 carla Python 套件（版本需與伺服器一致）。
 """
@@ -25,11 +25,9 @@ from PIL import Image
 
 # 確保專案根目錄在 import 路徑中
 import pathlib
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
+sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
-from libs.model.resnet101 import build_inference_model
-from libs.inference.carla_road_segmentation import predict_road_from_pil
-from libs.inference.road_segmentation import apply_road_mask
+from libs.inference.road_segmentation import load_pidnet, apply_road_mask
 from libs.inference.lane_segmentation import detect_lines_with_elsed, split_left_right_lines
 from libs.inference.lane_fitting import (
     collect_points_from_segments,
@@ -37,7 +35,8 @@ from libs.inference.lane_fitting import (
     compute_lane_widths,
 )
 from libs.inference.pitch_estimation import estimate_pitch_from_widths
-from libs.visualization.carla_visualization import render_piecewise_fits_to_array
+from carla_module.carla_road_segmentation import predict_road_from_pil
+from carla_module.carla_visualization import render_piecewise_fits_to_array
 
 
 # ---------------------------------------------------------------------------
@@ -129,12 +128,11 @@ def run_pipeline(
     cfg: dict,
 ) -> tuple:
     """執行完整五階段推斷，回傳 (resized_image, left_fits, right_fits, widths, pitch_deg)。"""
-    # BGR → RGB → PIL Image（DeepLabV3 模型期望 RGB 輸入）
+    # BGR → RGB → PIL Image（PIDNet 模型期望 RGB 輸入）
     rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
     pil_image = Image.fromarray(rgb)
 
     resize_size = tuple(cfg["input"]["resize_size"])          # (512, 1024)
-    threshold   = cfg["road_segmentation"]["threshold"]
     min_slope   = cfg["lane_segmentation"]["min_slope"]
     min_len     = cfg["lane_segmentation"]["min_segment_length"]
     tolerance   = cfg["lane_segmentation"]["lane_band_tolerance"]
@@ -145,9 +143,9 @@ def run_pipeline(
     f_y         = cfg["pitch_estimation"]["f_y"]   # 已覆蓋為 512
     w_real      = cfg["pitch_estimation"]["w_real"]
 
-    # 階段 1：道路分割
+    # 階段 1：道路分割（PIDNet，argmax 取代 sigmoid+threshold）
     resized_image, pred_mask = predict_road_from_pil(
-        model, pil_image, device, resize_size, threshold
+        model, pil_image, device, resize_size
     )
     masked_road = apply_road_mask(resized_image, pred_mask)
 
@@ -252,8 +250,8 @@ def main() -> None:
     device = select_device(cfg["model"]["device"])
     print(f"[初始化] 使用裝置：{device}")
 
-    model = build_inference_model(device, cfg["model"]["model_path"])
-    print("[初始化] 模型載入完成")
+    model = load_pidnet(cfg["model"]["model_name"], cfg["model"]["weight_path"], device)
+    print("[初始化] PIDNet 模型載入完成")
 
     client, world, vehicle, camera = setup_carla(args.host, args.port, args.timeout, args.map)
     print(f"[初始化] CARLA 連線成功，車輛已生成於 {vehicle.get_transform().location}")
@@ -308,7 +306,7 @@ def main() -> None:
         vehicle.set_autopilot(False)
         vehicle.destroy()
         cv2.destroyAllWindows()
-        print("[清理] 完成，已離開 CARLA 場景。")
+        print("[清理] 已離開 CARLA 場景。")
 
 
 if __name__ == "__main__":

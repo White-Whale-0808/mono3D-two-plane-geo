@@ -11,7 +11,7 @@ uv sync                                         # Install all dependencies
 uv run python main.py                           # Run inference pipeline
 uv run python utils/train_road_segmentation.py  # Run training
 uv run python utils/plot_frameId_and_pitch.py   # Plot frame metadata
-uv run python carla_realtime_test.py            # CARLA real-time pitch estimation
+uv run python carla_module/realtime_test.py     # CARLA real-time pitch estimation
 python scripts/setup_elsed.py                   # One-time: clone & patch pyelsed (uses stdlib only)
 ```
 
@@ -85,8 +85,8 @@ This is a monocular 3D road and lane perception system. Given a single camera im
 Five sequential stages, all configured via `config/inference_road_lane_segmentation.yaml`:
 
 **Stage 1 — Road segmentation** (`libs/inference/road_segmentation.py`)
-- Loads a trained DeepLabV3-ResNet101 checkpoint
-- Runs forward pass → sigmoid → threshold → binary mask
+- Loads a PIDNet-L checkpoint pretrained on Cityscapes (19 classes)
+- Runs forward pass → interpolate to input size → argmax → road mask (class 0)
 - Applies mask to the input image with bitwise AND
 
 **Stage 2 — Lane detection** (`libs/inference/lane_segmentation.py`)
@@ -134,26 +134,28 @@ Configured via `config/train_road_segmentation.yaml`.
 | `libs/model/resnet101.py` | `build_train_model()` / `build_inference_model()` — wraps TorchVision DeepLabV3 |
 | `libs/dataset/cityscape_dataset.py` | Dataset loader + `ToRoadMask` transform |
 | `libs/engine/train.py` / `validate.py` | Per-epoch training and IoU validation loops |
-| `libs/inference/road_segmentation.py` | Inference-time road masking |
-| `libs/inference/carla_road_segmentation.py` | `predict_road_from_pil()` — accepts PIL Image directly (used by CARLA script) |
+| `libs/inference/road_segmentation.py` | `load_pidnet()` / `predict_road()` / `apply_road_mask()` — PIDNet inference |
 | `libs/inference/lane_segmentation.py` | ELSED detection + slope/position lane classification |
 | `libs/inference/lane_fitting.py` | Point collection, piecewise linear fitting, lane width computation |
 | `libs/inference/pitch_estimation.py` | Pinhole-model depth + Theil-Sen pitch estimation |
 | `libs/metric/iou.py` | IoU computation used during validation |
 | `libs/visualization/lane_visualization.py` | Loss curve, lane overlay, and piecewise-fit plotting (file output) |
-| `libs/visualization/carla_visualization.py` | `render_piecewise_fits_to_array()` — returns BGR ndarray for `cv2.imshow` |
 | `config/` | YAML configs for train and inference (paths, hyperparameters, device) |
 | `outputs/` | Inference result images |
 | `results/` | Training loss plots |
 | `models/` | Saved model checkpoints |
+| `pidnet_models/` | PIDNet model architecture (pidnet.py, model_utils.py) and speed variants |
+| `pidnet_pretrained_model/` | PIDNet pretrained weights (see readme.txt for download instructions) |
 | `utils/env_setup.py` | Shared startup helper: loads `.env` and registers OpenCV DLL path on Windows |
-| `carla_realtime_test.py` | Real-time CARLA test: spawns vehicle, runs 5-stage pipeline, displays pitch overlay |
+| `carla_module/realtime_test.py` | Real-time CARLA test: spawns vehicle, runs 5-stage pipeline, displays pitch overlay |
+| `carla_module/carla_road_segmentation.py` | `predict_road_from_pil()` — PIDNet version accepting PIL Image (CARLA streaming) |
+| `carla_module/carla_visualization.py` | `render_piecewise_fits_to_array()` — returns BGR ndarray for `cv2.imshow` |
 | `scripts/setup_elsed.py` | One-time setup: clones pyelsed and applies Python 3.12 / Windows patches |
 | `.env.example` | Template for machine-specific paths (`CARLA_WHL_PATH`, `OPENCV_BIN_PATH`, `OPENCV_DIR`) |
 
 ### CARLA camera parameters
 
-`carla_realtime_test.py` uses `image_size_x=1024`, `image_size_y=512`, `fov=90°`, which gives `f_x = f_y = 512` (square pixels). The config value `f_y=455` (from a real camera) is overridden at runtime to match CARLA's pinhole model.
+`carla_module/realtime_test.py` uses `image_size_x=1024`, `image_size_y=512`, `fov=90°`, which gives `f_x = f_y = 512` (square pixels). The config value `f_y=455` (from a real camera) is overridden at runtime to match CARLA's pinhole model.
 
 ### pyelsed build notes (Windows + Python 3.12)
 
