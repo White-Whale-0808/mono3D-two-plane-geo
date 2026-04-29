@@ -1,6 +1,8 @@
 model:
-  device: "cpu"
-  model_path: "models/road_segmentation_best.pth"
+  device: "cuda"
+  model_name: "pidnet_l"
+  weight_path: "pidnet_pretrained_model/PIDNet_L_Cityscapes_val.pt"
+  model_path: "models/road_segmentation_best.pth"  # ResNet101 舊權重（已棄用）
 
 input:
   image_path: "inference_datasets/solid_line/up_hile/pitch_0_215.png"
