@@ -61,13 +61,13 @@ def split_left_right_lines(segments, image_width, min_slope, img_height, lane_ba
     innermost_right_x = right_segments[0]["x_at_bottom"]
     inner_right = [l["seg"] for l in right_segments
                     if l["x_at_bottom"] <= (innermost_right_x + lane_band_tolerance)
-                    # and l["x_at_bottom"] < center_x * (2 - ROI)]  
+                    # and l["x_at_bottom"] < center_x * (2 - ROI)]
                    ]
 
     return inner_left, inner_right  # Return type is list of dict
 
 # """
-# Lane classification: method 1 
+# Lane classification: method 1
 # - find the lane seed by selecting the line segment that extends to the bottom of the image and has a certain length.
 # - bad with generalization
 # """
@@ -75,13 +75,13 @@ def split_left_right_lines(segments, image_width, min_slope, img_height, lane_ba
 
 #     candidate_seeds = []
 #     bottom_threshold = image_height * 0.5
-    
+
 #     for seg in segments:
 #         x1, y1, x2, y2 = seg
 #         length = np.sqrt((x2-x1)**2 + (y2-y1)**2)
-        
+
 #         if max(y1, y2) > bottom_threshold and length > min_length and x1 != x2:
-#             slope = (y2 - y1) / (x2 - x1) 
+#             slope = (y2 - y1) / (x2 - x1)
 #             x_bottom = x1 + (image_height - y1) / slope  # Extend the line to the bottom of the image
 #             candidate_seeds.append({'seg': seg, 'x_bottom': x_bottom})
 #     selector = max if is_left else min

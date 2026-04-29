@@ -5,7 +5,7 @@ model:
   model_path: "models/road_segmentation_best.pth"  # ResNet101 舊權重（已棄用）
 
 input:
-  image_path: "inference_datasets/solid_line/up_hile/pitch_0_215.png"
+  image_path: "inference_datasets/solid_line/up_hile/images/000500.png"
   resize_size:
     - 512
     - 1024
@@ -18,7 +18,7 @@ lane_segmentation:
   min_slope: 0.3
   min_segment_length: 15  # Discard ELSED segments shorter than this (pixels)
   # roi: 0.2
-  lane_band_tolerance: 60  # Max x_at_bottom deviation (pixels) from innermost segment to still be considered the same lane marking
+  lane_band_tolerance: 10  # Max x_at_bottom deviation (pixels) from innermost segment to still be considered the same lane marking
 
 lane_fitting:
   extra_points_per_segment: 10
@@ -29,7 +29,8 @@ lane_fitting:
 pitch_estimation:
   f_x: 512  # Focal length calculated from camera intrinsics and resize dimensions
   f_y: 455
-  w_real: 3.5  # Get from carla 
+  w_real: 3.5  # Get from carla
+
 visualization:
   alpha: 0.4
   save_path: "outputs/result.png"

@@ -72,20 +72,20 @@ def compute_lane_widths(left_fits, right_fits, num_samples):
     left_y_max = max(f["y_end"] for f in left_fits)
     right_y_min = min(f["y_start"] for f in right_fits)
     right_y_max = max(f["y_end"] for f in right_fits)
-    
+
     y_min = max(left_y_min, right_y_min)
     y_max = min(left_y_max, right_y_max)
-    
+
     """
     Sample num_samples y-values within the overlapping range
     """
     sample_ys = np.linspace(y_min, y_max, num_samples)
     widths = []
-    
+
     for y in sample_ys:
         x_left = get_x_at_y(left_fits, y)
         x_right = get_x_at_y(right_fits, y)
         if x_left is not None and x_right is not None:
             widths.append((y, x_right - x_left))
-    
+
     return np.array(widths)

@@ -38,7 +38,7 @@ w_real = config["pitch_estimation"]["w_real"]
 def main():
     model = load_pidnet(model_name, weight_path, device)
     t0 = time.perf_counter()
-    
+
     resized_image, pred_mask = predict_road(model, image_path, device, resize_size)
     masked_road = apply_road_mask(resized_image, pred_mask)
     t1 = time.perf_counter()
@@ -52,7 +52,7 @@ def main():
     # left_clus, right_clus = cluster_left_right(left_lines, right_lines)
     inner_left, inner_right = split_left_right_lines(
         segments, resized_image.width, min_slope, resized_image.height,
-        lane_band_tolerance, resized_image=resized_image
+        lane_band_tolerance
     )
     t3 = time.perf_counter()
 
