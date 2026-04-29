@@ -5,20 +5,20 @@ model:
   # weight_path: "models/road_segmentation_best.pth"  # The original Resnet101 model is too slow and not accurate enough, so we switched to PIDNet_L 
 
 input:
-  image_path: "inference_datasets/solid_line/up_hile/images/000417.png"
+  image_path: "inference_datasets/solid_line/up_hile/images/000201.png"
   image_batch_path: "inference_datasets/solid_line/up_hile/images"
-  image_batch_size: 311
+  image_batch_size: 305
   resize_size:
     - 512
     - 1024
 
 road_segmentation:
-  threshold: 0.5
+  # threshold: 0.5  # The original Resnet101 model is too slow and not accurate enough, so we switched to PIDNet_L 
   # mask_erosion_kernel: 3  # Erode mask inward by this many pixels to eliminate edge artifacts
 
 lane_segmentation:
   min_slope: 0.3
-  min_segment_length: 15  # Discard ELSED segments shorter than this (pixels)
+  min_segment_length: 45  # Discard ELSED segments shorter than this (pixels)
   # roi: 0.2
   lane_band_tolerance: 10  # Max x_at_bottom deviation (pixels) from innermost segment to still be considered the same lane marking
 
