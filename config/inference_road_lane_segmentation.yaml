@@ -1,8 +1,8 @@
 model:
-  device: "cuda"
+  device: "cpu"
   model_name: "pidnet_l"
-  weight_path: "pidnet_pretrained_model/PIDNet_L_Cityscapes_val.pt"
-  model_path: "models/road_segmentation_best.pth"  # ResNet101 舊權重（已棄用）
+  weight_path: "pidnet_pretrained_model/PIDNet_L_Cityscapes_test.pt"
+  # weight_path: "models/road_segmentation_best.pth"  # The original Resnet101 model is too slow and not accurate enough, so we switched to PIDNet_L 
 
 input:
   image_path: "inference_datasets/solid_line/up_hile/images/000417.png"
