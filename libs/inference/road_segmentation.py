@@ -83,5 +83,12 @@ def apply_road_mask(resized_image, pred_mask):
     """
     # kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (erosion_kernel, erosion_kernel))
     # road_mask_255 = cv2.erode(road_mask_255, kernel)  # Shrink mask inward to remove jagged boundary artifacts
+    # kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (601, 601))
+    # road_mask_255 = cv2.morphologyEx(road_mask_255, cv2.MORPH_CLOSE, kernel)
+
+    # blurred = cv2.GaussianBlur(road_mask_255, (51, 51), 0)
+    # road_mask_255 = (blurred > 127).astype(np.uint8) * 255
+
+    # smoothed_mask = (road_mask_255 // 255).astype(np.uint8)  # Convert back to 0/1 for create_overlay
     masked_road = cv2.bitwise_and(image, image, mask=road_mask_255)  # Image and Image when mask is true, else black. The cv2.bitwise_and accepts RGB images.
     return masked_road
