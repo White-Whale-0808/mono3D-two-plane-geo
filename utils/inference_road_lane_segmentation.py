@@ -22,7 +22,8 @@ resize_size = tuple(config["input"]["resize_size"])
 # threshold = config["road_segmentation"]["threshold"]
 # mask_erosion_kernel = config["road_segmentation"]["mask_erosion_kernel"]
 min_slope = config["lane_segmentation"]["min_slope"]
-min_segment_length = config["lane_segmentation"]["min_segment_length"]
+min_segment_length_near = config["lane_segmentation"]["min_segment_length_near"]
+min_segment_length_far  = config["lane_segmentation"]["min_segment_length_far"]
 # roi = config["lane_segmentation"]["roi"]
 lane_band_tolerance = config["lane_segmentation"]["lane_band_tolerance"]
 alpha = config["visualization"]["alpha"]
@@ -43,7 +44,7 @@ def main():
     masked_road = apply_road_mask(resized_image, pred_mask)
     t1 = time.perf_counter()
 
-    segments = detect_lines_with_elsed(masked_road, min_segment_length)
+    segments = detect_lines_with_elsed(masked_road, min_segment_length_near, min_segment_length_far)
     t2 = time.perf_counter()
 
     # inner_left, inner_right = split_left_right_lines(segments, resized_image.width, min_slope, resized_image.height, lane_band_tolerance, resized_image)

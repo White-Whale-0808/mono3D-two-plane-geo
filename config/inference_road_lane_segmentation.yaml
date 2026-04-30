@@ -18,7 +18,8 @@ road_segmentation:
 
 lane_segmentation:
   min_slope: 0.3
-  min_segment_length: 45  # Discard ELSED segments shorter than this (pixels)
+  min_segment_length_near: 65  # Length threshold at the bottom of the image (near camera)
+  min_segment_length_far: 0   # Length threshold at the top of the image (far / uphill); threshold is interpolated linearly between these two values based on segment mid-y
   # roi: 0.2
   lane_band_tolerance: 10  # Max x_at_bottom deviation (pixels) from innermost segment to still be considered the same lane marking
 

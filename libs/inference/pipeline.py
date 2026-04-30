@@ -6,7 +6,7 @@ from libs.inference.pitch_estimation   import estimate_pitch_from_widths
 
 def infer_one(
     model, image_path, device, resize_size,
-    min_slope, min_segment_length, lane_band_tolerance,
+    min_slope, min_segment_length_near, min_segment_length_far, lane_band_tolerance,
     extra_points_per_segment, num_bands, num_samples,
     f_x, f_y, w_real,
 ):
@@ -15,7 +15,7 @@ def infer_one(
     masked_road = apply_road_mask(resized_image, pred_mask)
 
     # line segmentation
-    segments = detect_lines_with_elsed(masked_road, min_segment_length)
+    segments = detect_lines_with_elsed(masked_road, min_segment_length_near, min_segment_length_far)
 
     # lane segmentation
     inner_left, inner_right = split_left_right_lines(

@@ -15,7 +15,8 @@ image_batch_path          = config["input"]["image_batch_path"]
 image_batch_size          = config["input"]["image_batch_size"]
 resize_size               = tuple(config["input"]["resize_size"])
 min_slope                 = config["lane_segmentation"]["min_slope"]
-min_segment_length        = config["lane_segmentation"]["min_segment_length"]
+min_segment_length_near   = config["lane_segmentation"]["min_segment_length_near"]
+min_segment_length_far    = config["lane_segmentation"]["min_segment_length_far"]
 lane_band_tolerance       = config["lane_segmentation"]["lane_band_tolerance"]
 num_bands                 = config["lane_fitting"]["num_bands"]
 num_samples               = config["lane_fitting"]["num_samples"]
@@ -45,7 +46,9 @@ def main():
             pitch = infer_one(
                 model, str(image_path),
                 device=device, resize_size=resize_size,
-                min_slope=min_slope, min_segment_length=min_segment_length,
+                min_slope=min_slope,
+                min_segment_length_near=min_segment_length_near,
+                min_segment_length_far=min_segment_length_far,
                 lane_band_tolerance=lane_band_tolerance,
                 extra_points_per_segment=extra_points_per_segment,
                 num_bands=num_bands, num_samples=num_samples,
