@@ -2,7 +2,8 @@ import time
 import yaml
 # from libs.model.resnet101 import build_inference_model
 from libs.inference.road_segmentation import load_pidnet, predict_road, apply_road_mask
-from libs.inference.lane_segmentation_up_hile import detect_lines_with_elsed, split_left_right_lines
+from libs.inference.line_segmentation import detect_lines_with_elsed
+from libs.inference.lane_segmentation_up_hile import split_left_right_lines
 from libs.visualization.lane_visualization import draw_lane_lines, create_overlay, draw_line_segments
 # from libs.inference.lane_segmentation import cluster_left_right, get_best_seed
 # from libs.visualization.lane_visualization import draw_kmeans_clusters, draw_lane_seed
@@ -21,9 +22,9 @@ image_path = config["input"]["image_path"]
 resize_size = tuple(config["input"]["resize_size"])
 # threshold = config["road_segmentation"]["threshold"]
 # mask_erosion_kernel = config["road_segmentation"]["mask_erosion_kernel"]
+min_segment_length_near = config["line_segmentation"]["min_segment_length_near"]
+min_segment_length_far  = config["line_segmentation"]["min_segment_length_far"]
 min_slope = config["lane_segmentation"]["min_slope"]
-min_segment_length_near = config["lane_segmentation"]["min_segment_length_near"]
-min_segment_length_far  = config["lane_segmentation"]["min_segment_length_far"]
 # roi = config["lane_segmentation"]["roi"]
 lane_band_tolerance = config["lane_segmentation"]["lane_band_tolerance"]
 alpha = config["visualization"]["alpha"]
@@ -70,7 +71,7 @@ def main():
 
     print(f"road segmentation:   {(t1-t0)*1000:.1f} ms")
     print(f"line segmentation:      {(t2-t1)*1000:.1f} ms")
-    print(f"lane classification: {(t3-t2)*1000:.1f} ms")
+    print(f"lane segmentation:   {(t3-t2)*1000:.1f} ms")
     print(f"lane fitting:        {(t4-t3)*1000:.1f} ms")
     print(f"pitch estimation:    {(t5-t4)*1000:.1f} ms")
 
