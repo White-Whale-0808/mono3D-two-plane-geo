@@ -1,20 +1,4 @@
-import cv2
-import pyelsed
 import numpy as np
-
-def detect_lines_with_elsed(masked_road, min_length_near, min_length_far):
-    gray = cv2.cvtColor(masked_road, cv2.COLOR_RGB2GRAY)
-    segments, _ = pyelsed.detect(gray)
-
-    x1, y1, x2, y2 = segments[:, 0], segments[:, 1], segments[:, 2], segments[:, 3]
-    lengths = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-    mid_y = (y1 + y2) / 2
-
-    H = masked_road.shape[0]
-    adaptive_thr = min_length_far + (min_length_near - min_length_far) * (mid_y / H)
-    segments = segments[lengths >= adaptive_thr]
-
-    return segments
 
 """
 1. Split the line segments into left and right lane candidates based on their slope and position in the image.
