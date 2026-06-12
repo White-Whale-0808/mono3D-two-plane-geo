@@ -18,6 +18,9 @@ def detect_lines_with_elsed(masked_road, min_length_near, min_length_far):
     gray = cv2.cvtColor(masked_road, cv2.COLOR_RGB2GRAY)  # The masked_road image must come from RGB format.
     segments, _ = pyelsed.detect(gray)  # segments is a list of line, size is (N, 4), scores is a list of confidence score for each line, size is (N,)
 
+    if len(segments) == 0:
+        return segments
+    
     x1, y1, x2, y2 = segments[:, 0], segments[:, 1], segments[:, 2], segments[:, 3]
     lengths = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
     mid_y = (y1 + y2) / 2
