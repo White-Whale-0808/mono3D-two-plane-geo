@@ -1,56 +1,25 @@
 """
-Inference pipeline with dynamic positive/negative angle lane-segmentation
-dispatch driven by knee-point detection.
+Inference pipeline — unified lane segmentation with perspective-adaptive ROI.
 Stages
 ------
-1. Road segmentation         (PIDNet)
-2. ELSED line detection      (shared)
-3. Loose left/right split    (sign + min_slope only, no inner/outer choice yet)
-4. Knee detection            → picks positive_angle / negative_angle / either
-5. Apply chosen module's     split_left_right_lines  (full inner/outer logic)
-6. Piecewise linear fit
-7. Pitch estimation
-
-Stage 4 uses an optional temporal hysteresis voter; pass ``hysteresis`` (a
-``HysteresisVoter`` instance) to enable it across consecutive frames. For
-single-image inference this can be left as None.
+1. Road segmentation   (PIDNet)
+2. ELSED line detection
+3. Lane segmentation   split_left_right_lines (ROI-based, innermost)
+4. Piecewise linear fit
+5. Pitch estimation
 """
 
 import cv2
 import numpy as np
 import pyelsed
 
-from libs.inference.road_segmentation  import predict_road, apply_road_mask
-from libs.inference.lane_segmentation_positive_angle import (
-    split_left_right_lines as split_positive,
-)
-from libs.inference.lane_segmentation_negative_angle import (
-    split_left_right_lines as split_negative,
-)
+from libs.inference.road_segmentation import predict_road, apply_road_mask
+from libs.inference.lane_segmentation import split_left_right_lines
+from libs.inference.line_segmentation import detect_lines_with_elsed
 from libs.inference.lane_fitting      import (
     collect_points_from_segments, piecewise_linear_fit, compute_lane_widths,
 )
 from libs.inference.pitch_estimation  import estimate_pitch_from_widths
-from libs.inference.knee_detection    import detect_knee, HysteresisVoter, loose_split
-
-
-# ---------------------------------------------------------------------------
-# Shared helpers (duplicated from lane_segmentation_*.py so this file is the
-# only place that needs to change when adding more variants)
-# ---------------------------------------------------------------------------
-
-def _elsed_detect(masked_road, min_length_near, min_length_far):
-    gray = cv2.cvtColor(masked_road, cv2.COLOR_RGB2GRAY)
-    segments, _ = pyelsed.detect(gray)
-    if len(segments) == 0:
-        return segments
-    x1, y1, x2, y2 = segments[:, 0], segments[:, 1], segments[:, 2], segments[:, 3]
-    lengths = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-    mid_y = (y1 + y2) / 2
-    H = masked_road.shape[0]
-    thr = min_length_far + (min_length_near - min_length_far) * (mid_y / H)
-    return segments[lengths >= thr]
-
 
 # ---------------------------------------------------------------------------
 # Pipeline
@@ -62,71 +31,51 @@ def infer_one(
     extra_points_per_segment, num_bands, num_samples,
     f_x, f_y, w_real,
     *,
-    default_version: str = "positive_angle",
-    hysteresis: HysteresisVoter | None = None,
+    camera_height: float = None,
     return_debug: bool = False,
 ):
     """Run the full pipeline on a single image.
 
     Parameters
     ----------
-    default_version
-        Used when knee detection returns ``either`` and no hysteresis history
-        is available yet.
-    hysteresis
-        Optional ``HysteresisVoter`` for temporal smoothing across frames.
-        Pass ``None`` for single-frame use.
     return_debug
-        If True, also return a dict with intermediate values (chosen version,
-        knee result, segments).
+        If True, also return a dict with intermediate values (n_segments).
     """
     # 1. road segmentation
     resized_image, pred_mask = predict_road(model, image_path, device, resize_size)
     masked_road = apply_road_mask(resized_image, pred_mask)
 
     # 2. ELSED line detection
-    segments = _elsed_detect(masked_road, min_segment_length_near, min_segment_length_far)
+    segments = detect_lines_with_elsed(masked_road, min_segment_length_near, min_segment_length_far)
 
-    # 3 + 4. knee-based version decision.
-    # Always run detect_knee (even with empty inputs → returns 'either' with
-    # reason='both_sides_weak') AND always call hysteresis.update so the
-    # voter's temporal history is advanced on every frame. Skipping these
-    # caused per-frame voter state to diverge from per_frame.csv-derived
-    # post-hoc hysteresis when frames had zero ELSED segments.
-    if len(segments) == 0:
-        left_raw, right_raw = [], []
-    else:
-        left_raw, right_raw = loose_split(
-            segments, resized_image.width, resized_image.height, min_slope)
-    knee_result = detect_knee(left_raw, right_raw)
-    if hysteresis is not None:
-        chosen_version = hysteresis.update(knee_result)
-    else:
-        chosen_version = (knee_result.version
-                          if knee_result.version != "either"
-                          else default_version)
-
-    # 5. apply the chosen module's full split
-    split_fn = split_positive if chosen_version == "positive_angle" else split_negative
-    inner_left, inner_right = split_fn(
+    # 3. lane segmentation (per-band innermost selection)
+    inner_left, inner_right = split_left_right_lines(
         segments, resized_image.width, min_slope,
-        resized_image.height, lane_band_tolerance,
+        resized_image.height, lane_band_tolerance, num_bands=num_bands,
+        f_x=f_x, f_y=f_y, camera_height=camera_height, w_real=w_real,
     )
 
-    # 6. lane fitting
+    # 4. lane fitting
     left_points  = collect_points_from_segments(inner_left,  extra_points_per_segment)
     right_points = collect_points_from_segments(inner_right, extra_points_per_segment)
     left_fits    = piecewise_linear_fit(left_points,  num_bands)
     right_fits   = piecewise_linear_fit(right_points, num_bands)
 
-    # 7. pitch estimation
-    widths = compute_lane_widths(left_fits, right_fits, num_samples)
-    pitch  = estimate_pitch_from_widths(widths, f_x, f_y, resized_image.height, w_real)
+    # 5. pitch estimation
+    #    pitch_per_depth : [(z_center, pitch_deg), ...] per-depth-band curve
+    #    two_plane       : continuous hinge model — pitch_near_deg /
+    #                      pitch_far_deg / z_knee / z_visible_min/max / pitch_at(z)
+    widths          = compute_lane_widths(left_fits, right_fits, num_samples)
+    pitch_per_depth = estimate_pitch_from_widths(widths, f_x, f_y, resized_image.height, w_real)
 
+    result = {
+        "pitch_per_depth": pitch_per_depth,   # per-depth-band Theil-Sen
+    }
     if return_debug:
-        return pitch, {
-            "version": chosen_version,
-            "knee_result": knee_result,
+        result["debug"] = {
             "n_segments": int(len(segments)),
+            "n_left": len(inner_left),
+            "n_right": len(inner_right),
+            "n_width_samples": int(len(widths)),
         }
-    return pitch
+    return result

@@ -1,4 +1,6 @@
 import time
+from pathlib import Path
+import pandas as pd
 import yaml
 from libs.inference.road_segmentation import load_pidnet, predict_road, apply_road_mask
 from libs.inference.line_segmentation import detect_lines_with_elsed
@@ -7,6 +9,7 @@ from libs.visualization.lane_visualization import draw_lane_lines, create_overla
 from libs.inference.lane_fitting import collect_points_from_segments, piecewise_linear_fit, compute_lane_widths
 from libs.visualization.lane_visualization import draw_piecewise_fits
 from libs.inference.pitch_estimation import estimate_pitch_from_widths
+from libs.visualization.pitch_visualization import plot_pitch_profile, gt_pitch_profile
 
 with open("config/inference_road_lane_segmentation.yaml", "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
@@ -28,6 +31,28 @@ extra_points_per_segment = config["lane_fitting"]["extra_points_per_segment"]
 f_x = config["pitch_estimation"]["f_x"]
 f_y = config["pitch_estimation"]["f_y"]
 w_real = config["pitch_estimation"]["w_real"]
+camera_height    = config["pitch_estimation"].get("camera_height")
+measurements_csv = config["csv_io"]["measurements_csv"]
+
+
+def compute_pitch_mae(pitch_per_depth, frame_id, measurements):
+    """Compute MAE between predicted per-depth pitch and distance-aligned GT.
+
+    For each predicted (z, pitch) band, looks up the GT pitch at that distance
+    ahead using the cumulative-distance alignment in measurements.csv, then
+    returns the mean absolute error across all valid bands.
+
+    Returns None if no valid GT samples exist (e.g. frame near end of dataset).
+    """
+    import numpy as np
+    zs = [z for z, _ in pitch_per_depth]
+    ps = np.array([p for _, p in pitch_per_depth])
+    gt = gt_pitch_profile(measurements, frame_id, zs)
+    valid = ~np.isnan(gt)
+    if not valid.any():
+        return None
+    return float(np.abs(ps[valid] - gt[valid]).mean())
+
 
 def main():
     """
@@ -50,7 +75,8 @@ def main():
     """
     inner_left, inner_right = split_left_right_lines(
         segments, resized_image.width, min_slope, resized_image.height,
-        lane_band_tolerance, num_bands=num_bands
+        lane_band_tolerance, num_bands=num_bands,
+        f_x=f_x, f_y=f_y, camera_height=camera_height, w_real=w_real,
     )
     t3 = time.perf_counter()
 
@@ -77,6 +103,17 @@ def main():
     print(f"lane segmentation:   {(t3-t2)*1000:.1f} ms")
     print(f"lane fitting:        {(t4-t3)*1000:.1f} ms")
     print(f"pitch estimation:    {(t5-t4)*1000:.1f} ms")
+
+    if Path(measurements_csv).exists():
+        frame_id = int(Path(image_path).stem)
+        measurements = pd.read_csv(measurements_csv)
+        mae = compute_pitch_mae(pitch_per_depth, frame_id, measurements)
+        if mae is not None:
+            print(f"pitch MAE:           {mae:.4f}°")
+        pitch_plot_path = save_path.replace(".png", "_pitch_profile.png")
+        plot_pitch_profile(frame_id, pitch_per_depth, measurements,
+                           save_path=pitch_plot_path)
+        print(f"pitch profile:       {pitch_plot_path}")
 
     overlay_save_path = save_path.replace(".png", "_overlay.png")
     create_overlay(resized_image, pred_mask, alpha, overlay_save_path)

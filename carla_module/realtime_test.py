@@ -29,13 +29,13 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 from libs.inference.road_segmentation import load_pidnet, apply_road_mask
 from libs.inference.line_segmentation import detect_lines_with_elsed
-from libs.inference.lane_segmentation_up_hile import split_left_right_lines
+from libs.inference.lane_segmentation import split_left_right_lines
 from libs.inference.lane_fitting import (
     collect_points_from_segments,
     piecewise_linear_fit,
     compute_lane_widths,
 )
-from libs.inference.pitch_estimation import estimate_pitch_from_widths
+from libs.inference.pitch_estimation import fit_two_plane_model
 from carla_module.carla_road_segmentation import predict_road_from_pil
 from carla_module.carla_visualization import render_piecewise_fits_to_array
 
@@ -65,8 +65,11 @@ def load_config(config_path: str) -> dict:
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     # CARLA 使用方形像素，FOV=90°、寬度=1024 → f_x = f_y = 512
-    # config 中的 f_y=455 來自真實相機的非方形像素，此處覆蓋以符合 CARLA 相機模型
+    # config 中的 f_y=455 來自 dataset 的非等比 resize（1280x720→1024x512），此處覆蓋以符合本模組相機
     cfg["pitch_estimation"]["f_y"] = cfg["pitch_estimation"]["f_x"]
+    # 本模組相機架設在 z=2.4 m（見 setup_carla 的 camera_transform），
+    # 覆蓋 config 中 dataset 收集器的 1.08 m
+    cfg["pitch_estimation"]["camera_height"] = 2.4
     return cfg
 
 
@@ -149,7 +152,7 @@ def run_pipeline(
     resized_image, pred_mask = predict_road_from_pil(
         model, pil_image, device, resize_size
     )
-    masked_road, _ = apply_road_mask(resized_image, pred_mask)
+    masked_road = apply_road_mask(resized_image, pred_mask)
 
     # 階段 2：車道線偵測（ELSED）
     segments = detect_lines_with_elsed(masked_road, min_len_near, min_len_far)
@@ -161,6 +164,8 @@ def run_pipeline(
         min_slope=min_slope,
         img_height=resized_image.height,
         lane_band_tolerance=tolerance,
+        f_x=f_x, f_y=f_y, w_real=w_real,
+        camera_height=cfg["pitch_estimation"].get("camera_height", 2.4),
     )
 
     # 車道線不足時（路口、遮蔽等），回傳空結果
@@ -183,12 +188,15 @@ def run_pipeline(
     if len(widths) == 0:
         return resized_image, left_fits, right_fits, widths, None
 
-    # 階段 5：俯仰角估計
-    pitch_deg = estimate_pitch_from_widths(
-        widths, f_x, f_y, resized_image.height, w_real
-    )
+    # 階段 5：俯仰角估計（兩平面模型：近/遠平面 pitch + 轉折距離）
+    try:
+        two_plane = fit_two_plane_model(
+            widths, f_x, f_y, resized_image.height, w_real
+        )
+    except ValueError:
+        two_plane = None
 
-    return resized_image, left_fits, right_fits, widths, pitch_deg
+    return resized_image, left_fits, right_fits, widths, two_plane
 
 
 def render_display(
@@ -212,8 +220,16 @@ def render_display(
     font_scale = 0.8
     thickness  = 2
 
-    # 估計俯仰角（左上角，青色）
-    est_text = f"Est. Pitch: {est_pitch:+.2f} deg" if est_pitch is not None else "Est. Pitch: --"
+    # 估計俯仰角（左上角，青色）：近/遠平面 + 轉折距離
+    if est_pitch is not None:
+        if est_pitch["z_knee"] is not None:
+            est_text = (f"Est. Pitch near {est_pitch['pitch_near_deg']:+.2f} / "
+                        f"far {est_pitch['pitch_far_deg']:+.2f} deg "
+                        f"(knee {est_pitch['z_knee']:.1f} m)")
+        else:
+            est_text = f"Est. Pitch: {est_pitch['pitch_near_deg']:+.2f} deg"
+    else:
+        est_text = "Est. Pitch: --"
     cv2.putText(display, est_text, (10, 30), font, font_scale, (0, 255, 255), thickness, cv2.LINE_AA)
 
     # Ground Truth 俯仰角（左上角，深青色）
