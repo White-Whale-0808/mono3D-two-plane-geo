@@ -127,3 +127,6 @@ repo 內沒有自己的 test（`carla_module/realtime_test.py` 是整合測試�
 - [ ] `config` 內仍留多個被註解的舊參數（`threshold`、`mask_erosion_kernel`、
       `roi`、`ransac_residual_threshold`）→ 確認不再需要後清理
 - [ ] README.md（398 行）內容是否同步到目前 pipeline，待對照一次
+
+### F. Linear integration verified
+- [x] WWH-5: Linear-GitHub 連動測試完成
