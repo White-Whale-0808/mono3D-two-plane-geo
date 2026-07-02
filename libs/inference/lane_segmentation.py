@@ -44,6 +44,9 @@ _RESET_GAP_M         = 2.0    # detection gap > 2 m => possible plane change
 _MAX_GRADE_DEG       = 15.0   # worst-case road grade the thresholds must absorb
 _GRADE_RAMP_Z0       = 6.0    # within 6 m the road is the ego plane: no grade slack
 _GRADE_RAMP_SPAN     = 6.0    # grade slack ramps to full between 6 m and 12 m
+_SUPPORT_MIN_LEN_PX  = 60.0   # lone seed-only re-seeded segments shorter than this
+                              # are isolated blobs (poles/hillside: 32-54 px;
+                              # legit single-seg far sections: >= 77 px)
 
 
 class _Geometry:
@@ -214,6 +217,13 @@ def _find_seed(infos, selected, is_left, center_x, base_tol, roi_near,
         lo, hi = band_edges[i], band_edges[i + 1]
         y_c = (lo + hi) / 2
 
+        # Above the flat-ground validity limit the seed x-window is derived
+        # from a collapsed z_min and spans half the image; poles and hillside
+        # edges get seeded there. Never SEED in that region (association may
+        # still track into it from below).
+        if geom is not None and not geom.z_valid(y_c):
+            continue
+
         if geom is not None:
             # Ego sits somewhere inside its lane: the inner marking lies at
             # lateral X in (0.5±δ)·w_real. The pixel window is evaluated with
@@ -259,6 +269,7 @@ def _find_seed(infos, selected, is_left, center_x, base_tol, roi_near,
 def _track_side(infos, is_left, center_x, img_height, base_tol, roi_near,
                 track_bands, geom):
     """Seed at the bottom, track upward by continuity; re-seed past dead ends."""
+    sign = -1.0 if is_left else 1.0
     y_lo = min(i["y_min"] for i in infos)
     y_hi = max(i["y_max"] for i in infos)
     if y_hi - y_lo < 1:
@@ -290,6 +301,7 @@ def _track_side(infos, is_left, center_x, img_height, base_tol, roi_near,
         return base_tol
 
     selected = {}
+    sections = []  # per seed: {"segs": [...], "first": bool, "extra_bands": int}
     search_from_band = track_bands - 1
     first_seed = True
 
@@ -299,11 +311,14 @@ def _track_side(infos, is_left, center_x, img_height, base_tol, roi_near,
             band_edges, search_from_band, geom, first_seed)
         if seed_items is None:
             break
+        section = {"segs": [], "first": first_seed, "extra_bands": 0}
+        sections.append(section)
         first_seed = False
 
         track_points = []  # accepted (x, y) endpoints, bottom -> top
         for info in seed_items:
             selected[info["seg"]] = True
+            section["segs"].append(info["seg"])
             for p in (info["p1"], info["p2"]):
                 track_points.append(p)
         track_points.sort(key=lambda p: -p[1])  # by y descending (near first)
@@ -327,6 +342,11 @@ def _track_side(infos, is_left, center_x, img_height, base_tol, roi_near,
             accepted = []
             for info in infos:
                 if info["seg"] in selected or not band_overlap(info, lo, hi):
+                    continue
+                # a lane line on this side can never have the opposite slope
+                # sign (seeds already enforce this; kerb and pole segments
+                # were slipping in through association)
+                if np.isfinite(info["slope"]) and info["slope"] * sign <= 0:
                     continue
                 x_c = _x_on_segment_line(info, y_c)
                 if abs(x_c - x_pred) > tol:
@@ -364,8 +384,10 @@ def _track_side(infos, is_left, center_x, img_height, base_tol, roi_near,
             for _, x_c, info in accepted:
                 if abs(x_c - best_x) <= gtol:
                     selected[info["seg"]] = True
+                    section["segs"].append(info["seg"])
                     for p in (info["p1"], info["p2"]):
                         track_points.append(p)
+            section["extra_bands"] += 1
             last_accept_y = y_c
 
         if stop_band < 0:
@@ -373,7 +395,20 @@ def _track_side(infos, is_left, center_x, img_height, base_tol, roi_near,
         # Re-seed strictly above the failure point for the next road section.
         search_from_band = stop_band - 1
 
-    return list(selected.keys())
+    # A re-seeded section whose track never accepted a band beyond its own
+    # seed group AND that is a lone short segment is an isolated blob (pole,
+    # hillside edge, mask hole), not a road section. Multi-segment or long
+    # seed-only sections are legitimate far lane sections that fit entirely
+    # inside one seed group.
+    kept = []
+    for sec in sections:
+        if sec["first"] or sec["extra_bands"] > 0 or len(sec["segs"]) >= 2:
+            kept.extend(sec["segs"])
+            continue
+        x1, y1, x2, y2 = sec["segs"][0]
+        if np.hypot(x2 - x1, y2 - y1) >= _SUPPORT_MIN_LEN_PX:
+            kept.extend(sec["segs"])
+    return kept
 
 
 def split_left_right_lines(
