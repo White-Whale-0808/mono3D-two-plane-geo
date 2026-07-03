@@ -71,6 +71,6 @@ see the module docstring), and a **legacy** fallback using the hand-tuned
 Config sections map 1:1 to pipeline stages:
 - `road_segmentation` — (currently empty, PIDNet uses argmax not threshold)
 - `line_segmentation` — `min_segment_length_near`, `min_segment_length_far`
-- `lane_segmentation` — `min_slope`, `lane_band_tolerance` (legacy fallback only; ignored once `camera_height` enables the geometry-driven path)
-- `lane_fitting` — `extra_points_per_segment`, `num_bands`, `num_samples`
+- `lane_segmentation` — `min_slope`, `lane_band_tolerance` (legacy fallback only; ignored once `camera_height` enables the geometry-driven path), `track_bands` (continuity-tracking band count, clamped to >= 16 internally; independent of `lane_fitting.num_bands`)
+- `lane_fitting` — `extra_points_per_segment`, `num_bands`, `samples_per_meter` (geometry mode: z-uniform width samples per meter of visible depth), `num_samples` (fallback count when `samples_per_meter` is unset or in legacy y-uniform mode)
 - `pitch_estimation` — `f_x`, `f_y`, `w_real`, `camera_height` (`camera_height` feeds the lane_segmentation geometry; CARLA overrides `f_y=f_x` and `camera_height=2.4`)

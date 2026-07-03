@@ -16,6 +16,7 @@ def plot_profile_mae(
     df: pd.DataFrame,
     save_path: str = "outputs/profile_mae.png",
     title: str = "Per-frame profile MAE",
+    y_max: float | None = 12.0,
 ) -> str:
     """Plot profile_mae per frame and save to PNG.
 
@@ -30,6 +31,10 @@ def plot_profile_mae(
         Output PNG path.
     title : str
         Figure title.
+    y_max : float | None
+        Caps the y-axis so a few extreme outliers don't flatten the rest of
+        the plot; mean/median/p90 are still computed over all points. Pass
+        None for auto-scaling.
 
     Returns
     -------
@@ -57,6 +62,8 @@ def plot_profile_mae(
     ax.set_xlabel("frame id")
     ax.set_ylabel("profile MAE (deg)")
     ax.set_title(title)
+    if y_max is not None:
+        ax.set_ylim(0, y_max)
     ax.legend(fontsize=8, loc="upper right")
     fig.tight_layout()
 

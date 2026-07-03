@@ -5,8 +5,14 @@ import yaml
 from pathlib import Path
 import numpy as np
 import pandas as pd
-from libs.inference.road_segmentation import load_pidnet
-from libs.inference.pipeline import infer_one
+from libs.inference.road_segmentation import load_pidnet, predict_road, apply_road_mask
+from libs.inference.line_segmentation import detect_lines_with_elsed
+from libs.inference.lane_segmentation import split_left_right_lines
+from libs.inference.lane_fitting import (
+    collect_points_from_segments,
+    piecewise_linear_fit, compute_lane_widths,
+)
+from libs.inference.pitch_estimation import estimate_pitch_from_widths
 from libs.visualization.pitch_visualization import gt_pitch_profile
 from libs.visualization.profile_mae_visualization import plot_profile_mae
 import traceback
@@ -24,8 +30,10 @@ min_segment_length_near   = config["line_segmentation"]["min_segment_length_near
 min_segment_length_far    = config["line_segmentation"]["min_segment_length_far"]
 min_slope                 = config["lane_segmentation"]["min_slope"]
 lane_band_tolerance       = config["lane_segmentation"]["lane_band_tolerance"]
+track_bands               = config["lane_segmentation"].get("track_bands", 16)
 num_bands                 = config["lane_fitting"]["num_bands"]
 num_samples               = config["lane_fitting"]["num_samples"]
+samples_per_meter         = config["lane_fitting"].get("samples_per_meter")
 extra_points_per_segment  = config["lane_fitting"]["extra_points_per_segment"]
 f_x                       = config["pitch_estimation"]["f_x"]
 f_y                       = config["pitch_estimation"]["f_y"]
@@ -34,9 +42,23 @@ camera_height             = config["pitch_estimation"].get("camera_height")
 input_csv                 = config["csv_io"]["input_dir"]
 output_csv                = config["csv_io"]["output_dir"]
 measurements_csv          = config["csv_io"]["measurements_csv"]
-profile_samples           = config["csv_io"]["profile_samples"]
+problem_csv               = config["csv_io"]["problem_csv"]
+problem_mae_threshold     = config["csv_io"]["problem_mae_threshold"]
 
 IMG_FMT = "{:06d}.png"
+
+
+def _compute_mae(pitch_curve, frame_id, measurements):
+    """Return profile MAE (float) or None if degenerate or no valid GT samples."""
+    if pitch_curve["pitch_at"] is None or len(pitch_curve["z_samples"]) == 0:
+        return None
+    zs = pitch_curve["z_samples"]
+    ps = pitch_curve["pitch_samples"]
+    gt = gt_pitch_profile(measurements, frame_id, zs)
+    valid = ~np.isnan(gt)
+    if not valid.any():
+        return None
+    return round(float(np.abs(ps[valid] - gt[valid]).mean()), 4)
 
 
 def main():
@@ -53,8 +75,9 @@ def main():
 
     image_batch_dir = Path(image_batch_path)
     n_missing_image = 0
+
     for i, row in enumerate(df.itertuples(index=False)):
-        frame_id = int(row.frame_id)
+        frame_id   = int(row.frame_id)
         image_path = image_batch_dir / IMG_FMT.format(frame_id)
 
         if not image_path.exists():
@@ -62,40 +85,44 @@ def main():
             continue
 
         try:
-            result = infer_one(
-                model, str(image_path),
-                device=device, resize_size=resize_size,
-                min_slope=min_slope,
-                min_segment_length_near=min_segment_length_near,
-                min_segment_length_far=min_segment_length_far,
-                lane_band_tolerance=lane_band_tolerance,
-                extra_points_per_segment=extra_points_per_segment,
-                num_bands=num_bands, num_samples=num_samples,
-                f_x=f_x, f_y=f_y, w_real=w_real,
-                camera_height=camera_height,
+            # 1. Road segmentation
+            resized_image, pred_mask = predict_road(model, str(image_path), device, resize_size)
+            masked_road = apply_road_mask(resized_image, pred_mask)
+
+            # 2. Line segmentation
+            segments = detect_lines_with_elsed(
+                masked_road, min_segment_length_near, min_segment_length_far
             )
 
-            pitch_per_depth = result["pitch_per_depth"]
-            if pitch_per_depth:
-                zs = [z for z, _ in pitch_per_depth]
-                ps = np.array([p for _, p in pitch_per_depth])
-                z_vis_min_col[i] = round(min(zs), 2)
-                z_vis_max_col[i] = round(max(zs), 2)
+            # 3. Lane segmentation
+            inner_left, inner_right = split_left_right_lines(
+                segments, resized_image.width, min_slope,
+                resized_image.height, lane_band_tolerance, track_bands=track_bands,
+                f_x=f_x, f_y=f_y, camera_height=camera_height, w_real=w_real,
+            )
 
-                # Profile MAE: |per-band predicted pitch - distance-aligned GT|
-                gt = gt_pitch_profile(measurements, frame_id, zs)
-                valid = ~np.isnan(gt)
-                if valid.any():
-                    profile_mae_col[i] = round(
-                        float(np.abs(ps[valid] - gt[valid]).mean()), 4
-                    )
+            # 4. Lane fitting
+            left_points  = collect_points_from_segments(inner_left,  extra_points_per_segment)
+            right_points = collect_points_from_segments(inner_right, extra_points_per_segment)
+            left_fits    = piecewise_linear_fit(left_points,  num_bands)
+            right_fits   = piecewise_linear_fit(right_points, num_bands)
+            widths       = compute_lane_widths(left_fits, right_fits, num_samples, f_x=f_x, w_real=w_real,
+                                               samples_per_meter=samples_per_meter)
 
-        except Exception:
+            # 5. Pitch estimation
+            pitch_curve = estimate_pitch_from_widths(widths, f_x, f_y, resized_image.height, w_real)
+
+            if pitch_curve["pitch_at"] is not None:
+                z_vis_min_col[i] = round(float(pitch_curve["z_visible_min"]), 2)
+                z_vis_max_col[i] = round(float(pitch_curve["z_visible_max"]), 2)
+                mae = _compute_mae(pitch_curve, frame_id, measurements)
+                if mae is not None:
+                    profile_mae_col[i] = mae
+
+        except Exception as e:
             skip_frame_ids.append(frame_id)
             n_skip_pipeline += 1
-            print("-" * 40)
-            print(f"bug: inference pipeline skipped frame id {frame_id} due to error")
-            traceback.print_exc()
+            print(f"  skip frame {frame_id}: {type(e).__name__}: {e}")
 
     df["z_visible_min"] = z_vis_min_col
     df["z_visible_max"] = z_vis_max_col
@@ -111,8 +138,17 @@ def main():
               f"mean={mae.mean():.4f}  median={mae.median():.4f}  "
               f"p90={mae.quantile(0.9):.4f}  max={mae.max():.4f}")
 
+    problem_df = df.loc[mae[mae > problem_mae_threshold].index, ["frame_id", "profile_mae"]].copy()
+    problem_df["image_path"] = problem_df["frame_id"].apply(
+        lambda fid: str(image_batch_dir / IMG_FMT.format(int(fid)))
+    )
+    problem_df = problem_df.sort_values("profile_mae", ascending=False)
+    Path(problem_csv).parent.mkdir(parents=True, exist_ok=True)
+    problem_df.to_csv(problem_csv, index=False)
+    print(f"problem frames (mae > {problem_mae_threshold}): {len(problem_df)} -> {problem_csv}")
+
     plot_path = plot_profile_mae(df, save_path="outputs/profile_mae.png")
-    print(f"profile MAE plot saved to {plot_path}")
+    print(f"MAE plot: {plot_path}")
 
 
 if __name__ == "__main__":

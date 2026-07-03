@@ -419,7 +419,7 @@ def split_left_right_lines(
     lane_band_tolerance: float,
     roi_near: float = 0.3,
     roi_far: float = 0.8,   # kept for signature compatibility (unused)
-    num_bands: int = 10,
+    track_bands: int = 16,
     *,
     f_x: float = None,
     f_y: float = None,
@@ -438,8 +438,10 @@ def split_left_right_lines(
         provided (see below).
     roi_far : float
         Unused (kept for signature compatibility).
-    num_bands : int
-        Lower bound on tracking band count (internally >= 16).
+    track_bands : int
+        Tracking band count (internally clamped to >= 16). Independent of
+        lane_fitting's num_bands — tracking steps and fitting knots are
+        separate concepts.
     f_x, f_y, camera_height, w_real : float, keyword-only
         Camera focal lengths (px), camera height above road (m) and real lane
         width (m). When ALL are given, association tolerance, seed window,
@@ -463,7 +465,7 @@ def split_left_right_lines(
         return [], []
 
     center_x = image_width / 2
-    track_bands = max(int(num_bands), 16)
+    track_bands = max(int(track_bands), 16)
 
     inner_left = _track_side(
         infos, True, center_x, img_height, lane_band_tolerance, roi_near,
