@@ -1,4 +1,4 @@
-"""Pitch profile visualization: predicted per-depth pitch vs distance-aligned GT.
+"""Pitch profile visualization: predicted continuous pitch(z) vs distance-aligned GT.
 
 x-axis: distance ahead of the vehicle (m)
 y-axis: road pitch (deg), RELATIVE to the plane the vehicle currently sits on
@@ -28,9 +28,9 @@ def gt_pitch_profile(measurements: pd.DataFrame, frame_id: int, distances):
     d0 = float(row["collect_dist_m"].iloc[0])
     p0 = float(row["gt_pitch_deg"].iloc[0])
 
-    dist_arr = df["collect_dist_m"].to_numpy()
+    dist_arr  = df["collect_dist_m"].to_numpy()
     pitch_arr = df["gt_pitch_deg"].to_numpy()
-    max_d = dist_arr[-1]
+    max_d     = dist_arr[-1]
 
     out = []
     for d in np.atleast_1d(distances):
@@ -43,15 +43,16 @@ def gt_pitch_profile(measurements: pd.DataFrame, frame_id: int, distances):
     return np.asarray(out)
 
 
-def plot_pitch_profile(frame_id, pitch_per_depth, measurements,
+def plot_pitch_profile(frame_id, pitch_curve, measurements,
                        max_dist=None, save_path=None):
-    """Plot per-depth-band pitch predictions vs GT.
+    """Plot continuous predicted pitch(z) vs GT.
 
     Parameters
     ----------
     frame_id : int
-    pitch_per_depth : list of (float, float)
-        [(z_center_m, pitch_deg), ...] from estimate_pitch_from_widths.
+    pitch_curve : dict
+        Output of estimate_pitch_from_widths — must contain keys
+        ``z_samples``, ``pitch_samples``, ``z_visible_min``, ``z_visible_max``.
     measurements : pd.DataFrame
         Loaded from measurements.csv.
     max_dist : float, optional
@@ -61,29 +62,34 @@ def plot_pitch_profile(frame_id, pitch_per_depth, measurements,
 
     Returns
     -------
-    str  — path of the saved figure.
+    str — path of the saved figure.
     """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    if pitch_per_depth:
-        zs_all = [z for z, _ in pitch_per_depth]
-        z_lo, z_hi = min(zs_all), max(zs_all)
+    z_samps     = pitch_curve.get("z_samples",     np.array([]))
+    pitch_samps = pitch_curve.get("pitch_samples", np.array([]))
+    has_pred    = len(z_samps) > 0
+
+    if has_pred:
+        z_lo = pitch_curve["z_visible_min"]
+        z_hi = pitch_curve["z_visible_max"]
     else:
         z_lo, z_hi = 0, 30
+
     if max_dist is None:
         max_dist = max(z_hi * 1.5, 15)
 
     d_grid = np.linspace(0, max_dist, 200)
-    gt = gt_pitch_profile(measurements, frame_id, d_grid)
+    gt     = gt_pitch_profile(measurements, frame_id, d_grid)
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
     ax.plot(d_grid, gt, color="tab:blue", lw=2, label="GT (distance-aligned)")
-    if pitch_per_depth:
-        zs, ps = zip(*pitch_per_depth)
-        ax.scatter(zs, ps, color="tab:orange", zorder=5, s=60,
-                   label="Predicted (per-depth bands)")
+    if has_pred:
+        ax.plot(z_samps, pitch_samps, color="tab:orange", lw=2,
+                label="Predicted (continuous spline)")
+
     ax.set_xlabel("distance ahead (m)")
     ax.set_ylabel("road pitch relative to ego plane (deg)")
     ax.set_title(f"Frame {frame_id:06d}: predicted pitch profile vs GT")
