@@ -14,7 +14,7 @@ from libs.inference.lane_fitting import (
 )
 from libs.visualization.lane_visualization import draw_piecewise_fits
 from libs.inference.pitch_estimation import estimate_pitch_from_widths
-from libs.visualization.pitch_visualization import plot_pitch_profile, gt_pitch_profile
+from libs.visualization.pitch_visualization import plot_pitch_profile, gt_pitch_profile, plot_y3d_profile
 
 with open("config/inference_road_lane_segmentation.yaml", "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
@@ -123,6 +123,12 @@ def main():
         pitch_plot_path = save_path.replace(".png", "_pitch_profile.png")
         plot_pitch_profile(frame_id, pitch_curve, measurements, save_path=pitch_plot_path)
         print(f"pitch profile: {pitch_plot_path}")
+
+        y3d_plot_path = save_path.replace(".png", "_y3d_profile.png")
+        plot_y3d_profile(frame_id, widths, pitch_curve, measurements,
+                         f_x, f_y, resized_image.height, w_real, camera_height,
+                         save_path=y3d_plot_path)
+        print(f"y3d profile: {y3d_plot_path}")
 
     overlay_save_path = save_path.replace(".png", "_overlay.png")
     create_overlay(resized_image, pred_mask, alpha, overlay_save_path)

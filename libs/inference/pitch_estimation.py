@@ -3,6 +3,27 @@ from scipy.stats import theilslopes
 from scipy.interpolate import UnivariateSpline
 
 
+def back_project_widths(widths, f_x, f_y, image_height, w_real):
+    """Back-project (y_pixel, pixel_width) pairs to camera-frame (z, Y_3d).
+
+    Inverse perspective: z = f_x·w_real/width, Y_3d = -z·(y_pixel - cy)/f_y
+    with cy = image_height/2. Non-positive widths are unphysical (lane fits
+    crossing near the vanishing point) and are dropped; no other filtering.
+    Canonical implementation shared by the estimator and the debug plots.
+
+    Returns (z, Y_3d) 1-D arrays, empty on malformed/empty input.
+    """
+    widths = np.asarray(widths)
+    if widths.ndim != 2 or widths.shape[1] != 2 or len(widths) == 0:
+        return np.array([]), np.array([])
+    widths = widths[widths[:, 1] > 0]
+    if len(widths) == 0:
+        return np.array([]), np.array([])
+    z = f_x * w_real / widths[:, 1]
+    Y_3d = -z * (widths[:, 0] - image_height / 2) / f_y
+    return z, Y_3d
+
+
 def estimate_pitch_from_widths(widths, f_x, f_y, image_height, w_real,
                                min_profile_range_m: float = 3.0,
                                min_valid_range_m: float = 0.5,
@@ -40,6 +61,11 @@ def estimate_pitch_from_widths(widths, f_x, f_y, image_height, w_real,
         pitch_at      : callable z -> pitch_deg, clamped to [z_visible_min, z_visible_max]
         z_samples     : 1-D ndarray of n_pitch_samples depth values
         pitch_samples : corresponding pitch angles (deg), continuous
+        y_samples     : fitted Y_3d curve evaluated at z_samples (spline or
+                        Theil-Sen line) — for profile debugging
+        z_points      : depths of the points that survived all filters and
+                        were actually fitted
+        y_points      : corresponding Y_3d values
         z_visible_min : float
         z_visible_max : float
     On degenerate/short input pitch_at is None and the sample arrays are empty.
@@ -48,6 +74,9 @@ def estimate_pitch_from_widths(widths, f_x, f_y, image_height, w_real,
         "pitch_at": None,
         "z_samples": np.array([]),
         "pitch_samples": np.array([]),
+        "y_samples": np.array([]),
+        "z_points": np.array([]),
+        "y_points": np.array([]),
         "z_visible_min": np.nan,
         "z_visible_max": np.nan,
     }
@@ -64,9 +93,9 @@ def estimate_pitch_from_widths(widths, f_x, f_y, image_height, w_real,
     if len(widths) == 0:
         return _empty
 
-    depths = f_x * w_real / widths[:, 1]
-    center_y = image_height / 2
-    Y_3d = -depths * (widths[:, 0] - center_y) / f_y
+    depths, Y_3d = back_project_widths(widths, f_x, f_y, image_height, w_real)
+    if len(depths) == 0:
+        return _empty
 
     # Depth cap: z ~ 1/pixel_width, so spurious few-pixel widths near the
     # vanishing point explode to unphysical depths.
@@ -109,6 +138,9 @@ def estimate_pitch_from_widths(widths, f_x, f_y, image_height, w_real,
             "pitch_at": lambda z, p=pitch_const: p,
             "z_samples": z_samps,
             "pitch_samples": np.full(n_pitch_samples, pitch_const),
+            "y_samples": res.intercept + res.slope * z_samps,
+            "z_points": depths,
+            "y_points": Y_3d,
             "z_visible_min": z_vis_min,
             "z_visible_max": z_vis_max,
         }
@@ -138,6 +170,9 @@ def estimate_pitch_from_widths(widths, f_x, f_y, image_height, w_real,
         "pitch_at": pitch_at,
         "z_samples": z_samps,
         "pitch_samples": pitch_samps,
+        "y_samples": spl(z_samps),
+        "z_points": depths,
+        "y_points": Y_3d,
         "z_visible_min": z_vis_min,
         "z_visible_max": z_vis_max,
     }
