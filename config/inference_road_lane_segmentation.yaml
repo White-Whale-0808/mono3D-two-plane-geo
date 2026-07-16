@@ -5,9 +5,8 @@ model:
   # weight_path: "models/road_segmentation_best.pth"  # The original Resnet101 model is too slow and not accurate enough, so we switched to PIDNet_L 
 
 input:
-  image_path: "inference_datasets/carla_dataset_Town03_uphile/images/000000.png"
+  image_path: "inference_datasets/carla_dataset_Town03_uphile/images/000310.png"
   image_batch_path: "inference_datasets/carla_dataset_Town03_uphile/images"
-  image_batch_size: 305
   resize_size:
     - 512
     - 1024
@@ -28,7 +27,7 @@ lane_segmentation:
 
 lane_fitting:
   extra_points_per_segment: 10  # Points interpolated along each raw line segment before fitting
-  num_bands: 4  # Number of horizontal bands for piecewise linear fitting
+  num_bands: 5  # Number of horizontal bands for piecewise linear fitting
   num_samples: 80  # Fallback sample count: y-uniform legacy mode, or geometry mode when samples_per_meter is unset
   samples_per_meter: 6  # Geometry mode: width samples per meter of visible depth (n = z_range * this, clamped to [2, 2000]); keeps sample density scene-invariant
 
