@@ -16,7 +16,7 @@ def plot_profile_mae(
     df: pd.DataFrame,
     save_path: str = "outputs/profile_mae.png",
     title: str = "Per-frame profile MAE",
-    y_max: float | None = 12.0,
+    y_max: float | None = 4.0,
 ) -> str:
     """Plot profile_mae per frame and save to PNG.
 
@@ -33,8 +33,10 @@ def plot_profile_mae(
         Figure title.
     y_max : float | None
         Caps the y-axis so a few extreme outliers don't flatten the rest of
-        the plot; mean/median/p90 are still computed over all points. Pass
-        None for auto-scaling.
+        the plot; mean/median/p90 are still computed over all points. Frames
+        with MAE above the cap are pinned at the top edge as red triangles
+        (with their count in the legend) instead of silently disappearing.
+        Pass None for auto-scaling.
 
     Returns
     -------
@@ -63,6 +65,12 @@ def plot_profile_mae(
     ax.set_ylabel("profile MAE (deg)")
     ax.set_title(title)
     if y_max is not None:
+        clipped_mask = y_valid > y_max
+        n_clipped = int(clipped_mask.sum())
+        if n_clipped:
+            ax.scatter(x_valid[clipped_mask], np.full(n_clipped, y_max),
+                       marker="^", color="tab:red", s=36, clip_on=False,
+                       zorder=5, label=f"clipped > {y_max}° (n={n_clipped})")
         ax.set_ylim(0, y_max)
     ax.legend(fontsize=8, loc="upper right")
     fig.tight_layout()

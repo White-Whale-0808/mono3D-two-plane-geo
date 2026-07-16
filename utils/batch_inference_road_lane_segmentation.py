@@ -24,7 +24,6 @@ device                    = config["model"]["device"]
 model_name                = config["model"]["model_name"]
 weight_path               = config["model"]["weight_path"]
 image_batch_path          = config["input"]["image_batch_path"]
-image_batch_size          = config["input"]["image_batch_size"]
 resize_size               = tuple(config["input"]["resize_size"])
 min_segment_length_near   = config["line_segmentation"]["min_segment_length_near"]
 min_segment_length_far    = config["line_segmentation"]["min_segment_length_far"]

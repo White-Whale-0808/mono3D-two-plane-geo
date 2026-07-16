@@ -334,7 +334,6 @@ model:
 input:
   image_path: "..."             # single-image inference target
   image_batch_path: "..."       # directory for batch inference
-  image_batch_size: 305
   resize_size: [512, 1024]      # [height, width] — PIL will swap internally
 
 line_segmentation:
