@@ -5,8 +5,8 @@ Stages
 1. Road segmentation   (PIDNet)
 2. ELSED line detection
 3. Lane segmentation   split_left_right_lines (ROI-based, innermost)
-4. Piecewise linear fit
-5. Pitch estimation    continuous spline pitch(z)
+4. Lane fitting        inner-chain points → continuous lane curves
+5. Pitch estimation    widths from curves → continuous spline pitch(z)
 """
 
 import cv2
@@ -16,10 +16,8 @@ import pyelsed
 from libs.inference.road_segmentation import predict_road, apply_road_mask
 from libs.inference.lane_segmentation import split_left_right_lines
 from libs.inference.line_segmentation import detect_lines_with_elsed
-from libs.inference.lane_fitting      import (
-    collect_points_from_segments, piecewise_linear_fit, compute_lane_widths,
-)
-from libs.inference.pitch_estimation  import estimate_pitch_from_widths
+from libs.inference.lane_fitting      import inner_chain_points, refine_inner_points, lane_curve
+from libs.inference.pitch_estimation  import estimate_pitch_from_curves
 
 # ---------------------------------------------------------------------------
 # Pipeline
@@ -28,7 +26,7 @@ from libs.inference.pitch_estimation  import estimate_pitch_from_widths
 def infer_one(
     model, image_path, device, resize_size,
     min_slope, min_segment_length_near, min_segment_length_far, lane_band_tolerance,
-    extra_points_per_segment, num_bands, num_samples,
+    num_samples,
     f_x, f_y, w_real,
     *,
     camera_height: float = None,
@@ -57,16 +55,18 @@ def infer_one(
         f_x=f_x, f_y=f_y, camera_height=camera_height, w_real=w_real,
     )
 
-    # 4. lane fitting
-    left_points  = collect_points_from_segments(inner_left,  extra_points_per_segment)
-    right_points = collect_points_from_segments(inner_right, extra_points_per_segment)
-    left_fits    = piecewise_linear_fit(left_points,  num_bands)
-    right_fits   = piecewise_linear_fit(right_points, num_bands)
-    widths       = compute_lane_widths(left_fits, right_fits, num_samples, f_x=f_x, w_real=w_real,
-                                       samples_per_meter=samples_per_meter)
+    # 4. lane fitting — per-row inner-envelope chain (w_real is inner-edge
+    # to inner-edge; the tracker keeps whole marking groups for evidence),
+    # then a continuous gap-bridged curve per side
+    left_curve  = lane_curve(refine_inner_points(
+        resized_image, inner_chain_points(inner_left,  True),  True))
+    right_curve = lane_curve(refine_inner_points(
+        resized_image, inner_chain_points(inner_right, False), False))
 
-    # 5. pitch estimation — continuous spline pitch(z)
-    pitch_curve = estimate_pitch_from_widths(widths, f_x, f_y, resized_image.height, w_real)
+    # 5. pitch estimation — widths from the curves → continuous spline pitch(z)
+    pitch_curve = estimate_pitch_from_curves(
+        left_curve, right_curve, f_x, f_y, resized_image.height, w_real,
+        num_samples=num_samples, samples_per_meter=samples_per_meter)
 
     result = {"pitch_curve": pitch_curve}
     if return_debug:
@@ -75,7 +75,7 @@ def infer_one(
             "n_segments": int(len(segments)),
             "n_left": len(inner_left),
             "n_right": len(inner_right),
-            "n_width_samples": int(len(widths)),
+            "n_width_samples": int(len(pitch_curve["widths"])),
             "pitch_degenerate": degenerate,
         }
     return result
