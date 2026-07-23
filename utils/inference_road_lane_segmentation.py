@@ -8,13 +8,11 @@ import yaml
 from libs.inference.road_segmentation import load_pidnet, predict_road, apply_road_mask
 from libs.inference.line_segmentation import detect_lines_with_elsed
 from libs.inference.lane_segmentation import split_left_right_lines
-from libs.visualization.lane_visualization import draw_lane_lines, create_overlay, draw_line_segments
-from libs.inference.lane_fitting import (
-    collect_points_from_segments, piecewise_linear_fit, compute_lane_widths,
-)
-from libs.visualization.lane_visualization import draw_piecewise_fits
-from libs.inference.pitch_estimation import estimate_pitch_from_widths
-from libs.visualization.pitch_visualization import plot_pitch_profile, gt_pitch_profile, plot_y3d_profile
+from libs.visualization.lane_visualization import draw_lane_lines, create_overlay, draw_line_segments, save_lane_fitting_steps
+from libs.inference.lane_fitting import inner_chain_points, refine_inner_points, lane_curve
+from libs.visualization.lane_visualization import draw_lane_curves
+from libs.inference.pitch_estimation import estimate_pitch_from_curves
+from libs.visualization.pitch_visualization import plot_pitch_profile, gt_pitch_profile, plot_y3d_profile, save_pitch_estimation_steps
 
 with open("config/inference_road_lane_segmentation.yaml", "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
@@ -31,14 +29,13 @@ lane_band_tolerance = config["lane_segmentation"]["lane_band_tolerance"]
 track_bands = config["lane_segmentation"].get("track_bands", 16)
 alpha = config["visualization"]["alpha"]
 save_path = config["visualization"]["save_path"]
-num_bands = config["lane_fitting"]["num_bands"]
 num_samples = config["lane_fitting"]["num_samples"]
 samples_per_meter = config["lane_fitting"].get("samples_per_meter")
-extra_points_per_segment = config["lane_fitting"]["extra_points_per_segment"]
 f_x = config["pitch_estimation"]["f_x"]
 f_y = config["pitch_estimation"]["f_y"]
 w_real = config["pitch_estimation"]["w_real"]
 camera_height    = config["pitch_estimation"].get("camera_height")
+pitch_method     = config["pitch_estimation"].get("method", "windowed")
 measurements_csv = config["csv_io"]["measurements_csv"]
 
 
@@ -85,18 +82,22 @@ def main():
     """
     Lane fitting
     """
-    left_points = collect_points_from_segments(inner_left, extra_points_per_segment)
-    right_points = collect_points_from_segments(inner_right, extra_points_per_segment)
-    left_fits = piecewise_linear_fit(left_points, num_bands)
-    right_fits = piecewise_linear_fit(right_points, num_bands)
-    widths = compute_lane_widths(left_fits, right_fits, num_samples, f_x=f_x, w_real=w_real,
-                                 samples_per_meter=samples_per_meter)
+    left_points = refine_inner_points(
+        resized_image, inner_chain_points(inner_left, True), True)
+    right_points = refine_inner_points(
+        resized_image, inner_chain_points(inner_right, False), False)
+    left_curve = lane_curve(left_points)
+    right_curve = lane_curve(right_points)
     t4 = time.perf_counter()
 
     """
     Pitch estimation
     """
-    pitch_curve = estimate_pitch_from_widths(widths, f_x, f_y, resized_image.height, w_real)
+    pitch_curve = estimate_pitch_from_curves(
+        left_curve, right_curve, f_x, f_y, resized_image.height, w_real,
+        num_samples=num_samples, samples_per_meter=samples_per_meter,
+        method=pitch_method)
+    widths = pitch_curve["widths"]
     zs, ps = pitch_curve["z_samples"], pitch_curve["pitch_samples"]
     if len(zs) == 0:
         print("pitch: (degenerate — no valid depth range)")
@@ -112,6 +113,7 @@ def main():
     print(f"lane fitting:        {(t4-t3)*1000:.1f} ms")
     print(f"pitch estimation:    {(t5-t4)*1000:.1f} ms")
 
+    measurements, frame_id = None, None
     if Path(measurements_csv).exists():
         frame_id = int(Path(image_path).stem)
         measurements = pd.read_csv(measurements_csv)
@@ -134,10 +136,19 @@ def main():
     create_overlay(resized_image, pred_mask, alpha, overlay_save_path)
     draw_line_save_path = save_path.replace(".png", "_line_segments.png")
     draw_line_segments(resized_image, segments, draw_line_save_path)
-    draw_lane_save_path = save_path.replace(".png", "_lanes.png")
+    draw_lane_save_path = save_path.replace(".png", "_lanes_seg.png")
     draw_lane_lines(resized_image, inner_left, inner_right, draw_lane_save_path)
-    draw_piecewise_fits_save_path = save_path.replace(".png", "_lane_fits.png")
-    draw_piecewise_fits(resized_image, left_fits, right_fits, widths, draw_piecewise_fits_save_path)
+    draw_lane_curves_save_path = save_path.replace(".png", "_lane_fits.png")
+    draw_lane_curves(resized_image, left_curve, right_curve, draw_lane_curves_save_path)
+
+    steps_dir = save_lane_fitting_steps(resized_image, inner_left, inner_right,
+                                        "outputs/lane_fit_step")
+    print(f"lane fitting steps: {steps_dir}")
+    steps_dir = save_pitch_estimation_steps(
+        resized_image, left_curve, right_curve, pitch_curve,
+        f_x, f_y, resized_image.height, w_real, "outputs/pitch_est_step",
+        measurements=measurements, frame_id=frame_id)
+    print(f"pitch estimation steps: {steps_dir}")
 
 if __name__ == "__main__":
     main()

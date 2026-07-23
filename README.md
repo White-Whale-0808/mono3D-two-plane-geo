@@ -346,9 +346,8 @@ lane_segmentation:
   lane_band_tolerance: 10       # max x_at_bottom deviation (px) to merge into same lane
 
 lane_fitting:
-  extra_points_per_segment: 10  # interpolated points added per segment before fitting
-  num_bands: 3                  # number of horizontal bands for piecewise fitting
-  num_samples: 20               # y-samples for lane width computation
+  num_samples: 20               # fallback width-sample count (legacy / no samples_per_meter)
+  samples_per_meter: 6          # width-sample density per meter of depth (pitch_estimation)
 
 pitch_estimation:
   f_x: 512                      # horizontal focal length (px, after resize)

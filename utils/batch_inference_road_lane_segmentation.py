@@ -8,11 +8,8 @@ import pandas as pd
 from libs.inference.road_segmentation import load_pidnet, predict_road, apply_road_mask
 from libs.inference.line_segmentation import detect_lines_with_elsed
 from libs.inference.lane_segmentation import split_left_right_lines
-from libs.inference.lane_fitting import (
-    collect_points_from_segments,
-    piecewise_linear_fit, compute_lane_widths,
-)
-from libs.inference.pitch_estimation import estimate_pitch_from_widths
+from libs.inference.lane_fitting import inner_chain_points, refine_inner_points, lane_curve
+from libs.inference.pitch_estimation import estimate_pitch_from_curves
 from libs.visualization.pitch_visualization import gt_pitch_profile
 from libs.visualization.profile_mae_visualization import plot_profile_mae
 import traceback
@@ -30,14 +27,13 @@ min_segment_length_far    = config["line_segmentation"]["min_segment_length_far"
 min_slope                 = config["lane_segmentation"]["min_slope"]
 lane_band_tolerance       = config["lane_segmentation"]["lane_band_tolerance"]
 track_bands               = config["lane_segmentation"].get("track_bands", 16)
-num_bands                 = config["lane_fitting"]["num_bands"]
 num_samples               = config["lane_fitting"]["num_samples"]
 samples_per_meter         = config["lane_fitting"].get("samples_per_meter")
-extra_points_per_segment  = config["lane_fitting"]["extra_points_per_segment"]
 f_x                       = config["pitch_estimation"]["f_x"]
 f_y                       = config["pitch_estimation"]["f_y"]
 w_real                    = config["pitch_estimation"]["w_real"]
 camera_height             = config["pitch_estimation"].get("camera_height")
+pitch_method              = config["pitch_estimation"].get("method", "windowed")
 input_csv                 = config["csv_io"]["input_dir"]
 output_csv                = config["csv_io"]["output_dir"]
 measurements_csv          = config["csv_io"]["measurements_csv"]
@@ -100,16 +96,17 @@ def main():
                 f_x=f_x, f_y=f_y, camera_height=camera_height, w_real=w_real,
             )
 
-            # 4. Lane fitting
-            left_points  = collect_points_from_segments(inner_left,  extra_points_per_segment)
-            right_points = collect_points_from_segments(inner_right, extra_points_per_segment)
-            left_fits    = piecewise_linear_fit(left_points,  num_bands)
-            right_fits   = piecewise_linear_fit(right_points, num_bands)
-            widths       = compute_lane_widths(left_fits, right_fits, num_samples, f_x=f_x, w_real=w_real,
-                                               samples_per_meter=samples_per_meter)
+            # 4. Lane fitting — inner-chain points → continuous lane curves
+            left_curve  = lane_curve(refine_inner_points(
+                resized_image, inner_chain_points(inner_left,  True),  True))
+            right_curve = lane_curve(refine_inner_points(
+                resized_image, inner_chain_points(inner_right, False), False))
 
-            # 5. Pitch estimation
-            pitch_curve = estimate_pitch_from_widths(widths, f_x, f_y, resized_image.height, w_real)
+            # 5. Pitch estimation — widths from curves → continuous pitch(z)
+            pitch_curve = estimate_pitch_from_curves(
+                left_curve, right_curve, f_x, f_y, resized_image.height, w_real,
+                num_samples=num_samples, samples_per_meter=samples_per_meter,
+                method=pitch_method)
 
             if pitch_curve["pitch_at"] is not None:
                 z_vis_min_col[i] = round(float(pitch_curve["z_visible_min"]), 2)
