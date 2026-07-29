@@ -35,6 +35,7 @@ f_x = config["pitch_estimation"]["f_x"]
 f_y = config["pitch_estimation"]["f_y"]
 w_real = config["pitch_estimation"]["w_real"]
 camera_height    = config["pitch_estimation"].get("camera_height")
+camera_offset_m  = config["pitch_estimation"].get("camera_forward_offset", 0.0)
 pitch_method     = config["pitch_estimation"].get("method", "windowed")
 measurements_csv = config["csv_io"]["measurements_csv"]
 
@@ -46,7 +47,7 @@ def compute_pitch_mae(pitch_curve, frame_id, measurements):
         return None
     zs = pitch_curve["z_samples"]
     ps = pitch_curve["pitch_samples"]
-    gt = gt_pitch_profile(measurements, frame_id, zs)
+    gt = gt_pitch_profile(measurements, frame_id, zs, camera_offset_m)
     valid = ~np.isnan(gt)
     if not valid.any():
         return None
@@ -123,13 +124,16 @@ def main():
             print(f"pitch MAE: {mae:.4f}°")
 
         pitch_plot_path = save_path.replace(".png", "_pitch_profile.png")
-        plot_pitch_profile(frame_id, pitch_curve, measurements, save_path=pitch_plot_path)
+        plot_pitch_profile(frame_id, pitch_curve, measurements,
+                           save_path=pitch_plot_path,
+                           camera_offset_m=camera_offset_m)
         print(f"pitch profile: {pitch_plot_path}")
 
         y3d_plot_path = save_path.replace(".png", "_y3d_profile.png")
         plot_y3d_profile(frame_id, widths, pitch_curve, measurements,
                          f_x, f_y, resized_image.height, w_real, camera_height,
-                         save_path=y3d_plot_path)
+                         save_path=y3d_plot_path,
+                         camera_offset_m=camera_offset_m)
         print(f"y3d profile: {y3d_plot_path}")
 
     overlay_save_path = save_path.replace(".png", "_overlay.png")
@@ -147,7 +151,8 @@ def main():
     steps_dir = save_pitch_estimation_steps(
         resized_image, left_curve, right_curve, pitch_curve,
         f_x, f_y, resized_image.height, w_real, "outputs/pitch_est_step",
-        measurements=measurements, frame_id=frame_id)
+        measurements=measurements, frame_id=frame_id,
+        camera_offset_m=camera_offset_m)
     print(f"pitch estimation steps: {steps_dir}")
 
 if __name__ == "__main__":

@@ -42,7 +42,7 @@ _REFINE_MIN_GRAD = 4.0
 def inner_chain_points(segments, is_left, return_debug=False):
     """Clean inner-lane-line points for one side, from tracked segments.
 
-    w_real (3.5 m) is the INNER-edge-to-inner-edge lane width, but the lane
+    w_real (3.216 m) is the INNER-edge-to-inner-edge lane width, but the lane
     tracker deliberately keeps the whole marking group (all parallel paint
     edges — evidence for tracking). This function recovers the measurement
     semantics downstream:
