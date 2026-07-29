@@ -352,7 +352,9 @@ lane_fitting:
 pitch_estimation:
   f_x: 512                      # horizontal focal length (px, after resize)
   f_y: 455                      # vertical focal length (px, after resize)
-  w_real: 3.5                   # real-world lane width (meters)
+  w_real: 3.216                 # inner-edge-to-inner-edge lane width (m); NOT carla's lane_width (3.5, centre-to-centre)
+  camera_height: 1.08           # camera mount height above the road (m)
+  camera_forward_offset: 1.5    # camera mount offset ahead of the vehicle origin (m); GT distance alignment
 
 visualization:
   alpha: 0.4

@@ -7,11 +7,19 @@ GT alignment
 ------------
 measurements.csv gives, per frame, the slope of the plane the vehicle is ON
 (``gt_pitch_deg``) and the cumulative travelled distance (``collect_dist_m``).
-The road surface d meters ahead of frame i is the plane the vehicle itself
-will stand on once its cumulative distance reaches collect_dist_m[i] + d, so
+Both are recorded at the VEHICLE ORIGIN (``vehicle.get_transform()``), while
+the camera is mounted c = ``camera_offset_m`` ahead of it — so a point the
+camera sees at depth d sits at vehicle distance d + c. The road surface there
+is the plane the vehicle itself will stand on once its cumulative distance
+reaches collect_dist_m[i] + c + d, so
 
     gt_profile_i(d) = gt_pitch_deg[j(d)] - gt_pitch_deg[i]
-    j(d) = argmin_j | collect_dist_m[j] - (collect_dist_m[i] + d) |
+    j(d) = argmin_j | collect_dist_m[j] - (collect_dist_m[i] + c + d) |
+
+(The reference p0 is NOT shifted: the camera is rigidly attached to the
+vehicle, so the plane the profile is relative to is the vehicle's own.)
+Dropping c biases the whole profile: on this dataset c = 1.5 m, and ignoring
+it cost ~47% of the profile MAE (0.2331 -> 0.4428 over 544 frames).
 
 Distances beyond the recorded drive yield NaN.
 """
@@ -21,13 +29,19 @@ import pandas as pd
 from libs.inference.pitch_estimation import back_project_widths
 
 
-def gt_pitch_profile(measurements: pd.DataFrame, frame_id: int, distances):
-    """Vehicle-relative GT pitch at each distance ahead (NaN if out of range)."""
+def gt_pitch_profile(measurements: pd.DataFrame, frame_id: int, distances,
+                     camera_offset_m: float = 0.0):
+    """Vehicle-relative GT pitch at each distance ahead (NaN if out of range).
+
+    ``camera_offset_m`` is how far ahead of the vehicle origin the camera is
+    mounted; ``distances`` are camera depths. Defaults to 0 (camera at the
+    vehicle origin) — pass the real mount offset, see the module docstring.
+    """
     df = measurements.sort_values("collect_dist_m").reset_index(drop=True)
     row = df[df["frame_id"] == frame_id]
     if row.empty:
         raise ValueError(f"frame_id {frame_id} not in measurements")
-    d0 = float(row["collect_dist_m"].iloc[0])
+    d0 = float(row["collect_dist_m"].iloc[0]) + camera_offset_m
     p0 = float(row["gt_pitch_deg"].iloc[0])
 
     dist_arr  = df["collect_dist_m"].to_numpy()
@@ -46,17 +60,21 @@ def gt_pitch_profile(measurements: pd.DataFrame, frame_id: int, distances):
 
 
 def gt_height_profile(measurements, frame_id, distances, camera_height,
-                      step: float = 0.5):
+                      step: float = 0.5, camera_offset_m: float = 0.0):
     """GT road height Y(d) in the ego/camera frame at each distance ahead.
 
     Integrates tan(vehicle-relative GT pitch) over distance (trapezoid on a
     `step`-metre grid), anchored at Y(0) = -camera_height — the road surface
-    directly below the camera. Distances beyond the recorded drive yield NaN.
+    directly below the camera. The grid is in CAMERA depth, so the anchor
+    lands under the camera for any ``camera_offset_m``; the offset only moves
+    where each depth reads the GT (see gt_pitch_profile).
+    Distances beyond the recorded drive yield NaN.
     """
     d_req = np.atleast_1d(np.asarray(distances, dtype=float))
     d_max = float(np.max(d_req))
     grid = np.arange(0.0, d_max + step, step)
-    slope = np.tan(np.radians(gt_pitch_profile(measurements, frame_id, grid)))
+    slope = np.tan(np.radians(gt_pitch_profile(measurements, frame_id, grid,
+                                               camera_offset_m)))
     seg = 0.5 * (slope[1:] + slope[:-1]) * np.diff(grid)
     y = -camera_height + np.concatenate(([0.0], np.cumsum(seg)))
 
@@ -69,7 +87,8 @@ def gt_height_profile(measurements, frame_id, distances, camera_height,
 
 def plot_y3d_profile(frame_id, widths, pitch_curve, measurements,
                      f_x, f_y, image_height, w_real, camera_height,
-                     max_dist=None, save_path=None, debug=False):
+                     max_dist=None, save_path=None, debug=False,
+                     camera_offset_m=0.0):
     """Plot predicted (z, Y_3d) height points vs the GT-derived height profile.
 
     Shows, in the ego/camera frame (road below camera at -camera_height):
@@ -97,6 +116,8 @@ def plot_y3d_profile(frame_id, widths, pitch_curve, measurements,
         Loaded measurements.csv; pass None to skip the GT curve.
     camera_height : float or None
         GT anchor height; the GT curve is skipped when None.
+    camera_offset_m : float
+        Camera mount offset ahead of the vehicle origin, for GT alignment.
     max_dist : float, optional
         x-axis limit. Defaults to 1.5× the visible range.
     save_path : str, optional
@@ -144,7 +165,8 @@ def plot_y3d_profile(frame_id, widths, pitch_curve, measurements,
 
     if measurements is not None and camera_height is not None:
         d_grid = np.linspace(0, max_dist, 400)
-        gt_y = gt_height_profile(measurements, frame_id, d_grid, camera_height)
+        gt_y = gt_height_profile(measurements, frame_id, d_grid, camera_height,
+                                 camera_offset_m=camera_offset_m)
         ax.plot(d_grid, gt_y, color="tab:green", lw=2,
                 label="GT height (integrated)", zorder=4)
         ax.axhline(-camera_height, color="0.8", lw=1, ls="--",
@@ -166,7 +188,8 @@ def plot_y3d_profile(frame_id, widths, pitch_curve, measurements,
 
 def save_pitch_estimation_steps(resized_image, left_curve, right_curve,
                                 pitch_curve, f_x, f_y, image_height, w_real,
-                                out_dir, measurements=None, frame_id=None):
+                                out_dir, measurements=None, frame_id=None,
+                                camera_offset_m=0.0):
     """Step-by-step pitch_estimation visualization into out_dir:
     00 width samples on the image, 01 back-projected height profile with the
     local-window fit (three example windows shaded), 02 pitch(z) curve
@@ -251,7 +274,7 @@ def save_pitch_estimation_steps(resized_image, left_curve, right_curve,
                 lw=2, label="pitch(z) = arctan(local slope)")
         if measurements is not None and frame_id is not None:
             grid = np.linspace(0, pitch_curve["z_visible_max"] * 1.3, 300)
-            gt = gt_pitch_profile(measurements, frame_id, grid)
+            gt = gt_pitch_profile(measurements, frame_id, grid, camera_offset_m)
             ax.plot(grid, gt, color="tab:blue", lw=2, label="GT (distance-aligned)")
     ax.set_xlabel("z (m)")
     ax.set_ylabel("pitch (deg)")
@@ -264,7 +287,7 @@ def save_pitch_estimation_steps(resized_image, left_curve, right_curve,
 
 
 def plot_pitch_profile(frame_id, pitch_curve, measurements,
-                       max_dist=None, save_path=None):
+                       max_dist=None, save_path=None, camera_offset_m=0.0):
     """Plot continuous predicted pitch(z) vs GT.
 
     Parameters
@@ -279,6 +302,8 @@ def plot_pitch_profile(frame_id, pitch_curve, measurements,
         x-axis limit. Defaults to 1.5× the visible range.
     save_path : str, optional
         Output PNG path. Defaults to outputs/pitch_profile_{frame_id:06d}.png.
+    camera_offset_m : float
+        Camera mount offset ahead of the vehicle origin, for GT alignment.
 
     Returns
     -------
@@ -302,7 +327,7 @@ def plot_pitch_profile(frame_id, pitch_curve, measurements,
         max_dist = max(z_hi * 1.5, 15)
 
     d_grid = np.linspace(0, max_dist, 200)
-    gt     = gt_pitch_profile(measurements, frame_id, d_grid)
+    gt     = gt_pitch_profile(measurements, frame_id, d_grid, camera_offset_m)
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
     ax.plot(d_grid, gt, color="tab:blue", lw=2, label="GT (distance-aligned)")
