@@ -205,47 +205,65 @@ WWH-8 期間跑過的等價性測試是臨時腳本，沒有進版控。
 現況 CSV 只有 4 欄：`frame_id, gt_pitch_deg, gt_speed_mps, collect_dist_m`
 （`DatasetWriter._CSV_HEADER`，L193）。
 
-## 第 1 組：一次性驗證（跑一次、印出來、確認完就好，不必進 CSV）
+## 第 1 組：一次性驗證 — **已完成（2026-07-30）✅ 結論：config 不用改**
 
 目的：直接驗證 `w_real = 3.216` 與 `camera_height = 1.08`，解除上述簡併。
 
-**工具已備好（2026-07-30）**：`carla_module/verify_carla_geometry.py`
-一支腳本涵蓋下面全部 4 項，在跑 CARLA server 的機器上執行：
+工具：`carla_module/verify_carla_geometry.py`（在跑 CARLA server 的機器上執行）
 
 ```bash
-uv run --no-sync python carla_module/verify_carla_geometry.py
+uv run --no-sync python carla_module/verify_carla_geometry.py --time-scale 1.0
 ```
 
-先把 CARLA 視窗鏡頭移到要量的路面（與 `get_carlaDataset.py` 相同的生成方式），
-不需要顯示視窗也不存圖。分 static（手煞車、物理落穩）與 driving（TM 對齊 +
-PID+FF 定速 18 km/h，與資料集完全相同的條件）兩階段取樣，判定以 driving 為準。
-輸出 `output/carla_geometry_verification_<時間戳>.{txt,json}`，把這兩個檔帶回
-開發機即可（json 含每幀原始值）。
+先把鏡頭移到要量的路面。分 static（手煞車落穩）與 driving（TM 對齊 + PID+FF
+18 km/h + pure-pursuit 橫向修正，與資料集相同條件）兩階段，判定以 driving 為準。
+輸出 `outputs/carla_geometry_verification_<時間戳>.{txt,json}`。
 
-判定的讀法（腳本會印，但這裡先講清楚免得誤讀）：**W/h 比值那一項不能用來
-判斷拆法** —— 3.216/1.08=2.9778 與 3.5/1.18=2.9660 只差 0.4%，兩個競爭假設都
-會通過比值檢查，那就是簡併本身。解除簡併靠的是 ②（地圖直接給 W）與
-③（地圖直接給 h）兩個直接量測；比值只是「地圖與影像有沒有互相矛盾」的自洽檢查。
+有效的一次執行：`20260730_235516`（Town03 上坡段，static 30 + driving 400 幀，
+路面 pitch 0→12.4°，全程守在同一 `lane_id`，橫向偏移 median 0.0001 m）。
 
-- [ ] **`waypoint.lane_width`** — 確認 CARLA 的 3.5 m 定義是**車道邊界中心到中心**
-      ```python
-      wp = world.get_map().get_waypoint(vehicle.get_location())
-      print(wp.lane_width)
-      ```
-- [ ] **標線寬** `wp.left_lane_marking.width` / `wp.right_lane_marking.width`
-      驗證式：`lane_width − (left.width + right.width)/2 == 3.216`？
-      目前反推出來的差值是 **0.284 m**。注意雙黃線那側的 `.width` 語意
-      （`SolidSolid` 是否含間隙）要看清楚
-- [ ] **相機到路面的實際高度** — 這是解簡併的關鍵
-      ```python
-      cam_z  = camera.get_transform().location.z
-      road_z = world.get_map().get_waypoint(vehicle.get_location()).transform.location.z
-      print(cam_z - road_z)   # 若 ≈1.08 → w_real 3.216 成立；若 ≈1.18 → 反之
-      ```
-      `CAMERA_HEIGHT = 1.08`（L55）是相對**車輛原點**掛載的，車輛原點不見得在地面
-- [ ] **確認相機無畸變、主點在正中心** — CARLA `sensor.camera.rgb` 是理想針孔，
-      主點應嚴格等於影像中心（resize 後 cy = 256）。這會坐實「平坦幀量到
-      cy = 253.3 px 是車身俯仰假象」的判斷（A/B 已否決 cy 修正）
+### 結論
+
+- [x] **`waypoint.lane_width` = 3.5000 m**（std 0，n=400）。確認是**邊界中心到中心**。
+- [x] **標線寬 = 0.125 m** —— 但**驗證式不成立，原因已查明**：
+      `SolidSolid`（雙黃）與 `Solid`（單白）**回報同樣的 0.125**，
+      也就是 **CARLA 的 `LaneMarking.width` 是「單條線寬」，不含第二條線、
+      也不含中間間隙**。所以 `lane_width − (l+r)/2` 在雙線那側**少扣**，
+      算出來的 3.375 偏大，**不可當成 `w_real`**。
+      這正是本項原本標記要確認的語意問題，現在有答案了。
+- [x] **相機到路面高度 = 1.0816 m**（坡度修正後，std 0.0035）→ **`camera_height=1.08`
+      成立（差 1.6 mm），1.18 假設由直接量測正式否決**（原本只靠 A/B MAE 間接否決）。
+      **⚠ 坑**：`cam_z − road_z` 是世界座標的**垂直高差**，但針孔模型要的是
+      **到路面的垂直距離**，上坡 θ 時前者被 1/cos(θ) 放大。實測 h_raw 隨坡度
+      單調上升（0°:1.0819 → 12°:1.1069），乘上 cos(坡度) 後全部收斂到 1.0813~1.0834，
+      std 由 0.0104 掉到 0.0035。腳本已改用坡度修正值當主量測。
+      另外 waypoint 要取**相機所在處**而非車輛所在處：相機前移 1.5 m，
+      在 9.5° 坡上那裡的路面高 0.25 m，用車輛 waypoint 會量到 1.3134（錯）。
+- [x] **相機無畸變、主點在正中心確認**：`lens_circle_multiplier = 0.0`、
+      `chromatic_aberration_intensity = 0.0` → 理想針孔。fov 90° @1280 反推 f=640，
+      resize 後 f_x=512.00 / f_y=455.11，與 config 的 512/455 一致。
+      **坐實了「平坦幀量到 cy=253.3 px 的 2.7 px 是車身俯仰假象」的判斷。**
+
+### 簡併如何解除（重要：不是靠②）
+
+`.width` 語意問題讓②這條路走不通，但**③把 h 直接量出來之後，簡併就已經解除**：
+影像約束 `W/h = 2.9778` 是可信的（`debug/check_width_calibration.py`，std 0.003），
+乘上直接量到的 `h = 1.0816` 得
+
+> **W = 2.9778 × 1.0816 = 3.2208 m**，與 config 的 `w_real = 3.216` 差 **4.8 mm（0.15%）**
+
+這條推導**完全不經過標線 `.width` 語意**，所以在雙線路段是唯一可信的 W。
+
+反向驗證：地圖公式的 3.375 若要成立，需要 h = 3.375/2.9778 = 1.1334 m，
+與直接量到的 1.0816（跨 0~12° 坡度 spread 僅 2 mm）明確矛盾 → **3.375 排除**。
+把差額拆回幾何也說得通：兩側內縮總量 0.2792 m，單線側 0.0625 m，
+故雙線側內縮 0.2167 m = 間隙/2 + 線寬 0.125 → **隱含雙黃線間隙 0.1834 m**，合理。
+
+### 要不要改 config？→ **不改**
+
+`w_real` 3.216 vs 量測 3.2208 差 0.15%、`camera_height` 1.08 vs 1.0816 差 1.6 mm，
+兩者都在影像擬合自身的不確定度內。改了要整批重跑 MAE 基準，換來 0.15% 的深度
+尺度變動，遠小於現行 MAE 0.2331 的量級。**現行標定值視為已被獨立量測背書。**
 
 ## 第 2 組：CSV 要加的欄位（影響 GT 品質，值得重採資料集）
 

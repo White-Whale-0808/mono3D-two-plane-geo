@@ -90,6 +90,10 @@ _PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 # 向下射線可接受的地面語意標籤（label 名稱字串比對，跨 CARLA 版本較穩）
 _GROUND_LABELS = {"Roads", "RoadLines", "Ground", "Terrain", "Sidewalks"}
 
+# 雙線標記：CARLA 的 LaneMarking.width 對這些型別回報的是**單條線寬**
+# （實測 SolidSolid 與 Solid 同樣回 0.125），不含第二條線也不含中間間隙
+_DOUBLE_MARKING_TYPES = {"SolidSolid", "BrokenBroken", "SolidBroken", "BrokenSolid"}
+
 # 判定用容差
 _TOL_WIDTH_M  = 0.02   # 車道寬 / 標線寬推導值
 _TOL_HEIGHT_M = 0.02   # 相機高
@@ -308,8 +312,9 @@ def _measure(world: carla.World,
         # 不 wrap 的話原始統計那欄會印出「路面 pitch +360°」這種讀不懂的值
         "body_pitch_deg":  _wrap_deg(float(veh_tf.rotation.pitch)),
         "body_roll_deg":   _wrap_deg(float(veh_tf.rotation.roll)),
-        # 高度：三種獨立量法
+        # 高度：三種獨立量法（h_perp 是 h_wp_cam 去掉坡度假象後的真值）
         "h_wp_cam":  None,
+        "h_perp":    None,
         "h_wp_veh":  None,
         "h_ray":     None if ray_z  is None else cam_loc.z - ray_z,
         "h_proj":    None if proj_z is None else cam_loc.z - proj_z,
@@ -324,6 +329,8 @@ def _measure(world: carla.World,
         "road_id":        None,
         "left_marking":   None,
         "right_marking":  None,
+        "marking_valid":  False,   # 兩側都有真實標記（排除路口的 NONE）
+        "marking_double": False,   # 任一側是雙線 → inner_to_inner 會少扣
     }
 
     if wp_veh is not None:
@@ -341,12 +348,30 @@ def _measure(world: carla.World,
         rec["lane_id"]        = int(wp_cam.lane_id)
         rec["road_id"]        = int(wp_cam.road_id)
 
+        # 針孔模型要的 h 是「相機到路面的垂直距離」，但 cam_z − road_z 是
+        # 世界座標的**垂直高差**。上坡 θ 時兩者差 1/cos(θ)：實測 12° 路段
+        # h_raw 漲到 1.1069，乘上 cos 後回到 1.0813，與平路的 1.0818 一致。
+        # 不修正的話，坡度越大量到的相機越「高」，是純粹的幾何假象。
+        rec["h_perp"] = rec["h_wp_cam"] * math.cos(
+            math.radians(rec["road_pitch_deg"]))
+
         left  = _marking_info(getattr(wp_cam, "left_lane_marking",  None))
         right = _marking_info(getattr(wp_cam, "right_lane_marking", None))
         rec["left_marking"]  = left
         rec["right_marking"] = right
-        if left is not None and right is not None:
-            # 車道寬是邊界中心到中心；內側邊到內側邊要各扣半個標線寬
+        rec["marking_valid"] = bool(
+            left and right
+            and left["type"] != "NONE" and right["type"] != "NONE"
+            and left["width"] > 0.0 and right["width"] > 0.0)
+        # 雙線標記（SolidSolid 等）的 .width 實測是「單條線寬」，不含第二條
+        # 也不含中間間隙 —— 見 _verdicts 第②項的說明
+        rec["marking_double"] = bool(
+            left and right and any(
+                m["type"] in _DOUBLE_MARKING_TYPES for m in (left, right)))
+
+        if rec["marking_valid"]:
+            # 車道寬是邊界中心到中心；內側邊到內側邊要各扣半個標線寬。
+            # 注意：這條公式只對單線標記成立，雙線那側會少扣（見第②項）
             rec["inner_to_inner"] = (
                 rec["lane_width"] - (left["width"] + right["width"]) / 2.0)
 
@@ -438,40 +463,63 @@ def _verdicts(records: list[dict], cfg: dict) -> tuple[list[str], dict]:
             lines.append(f"   → 不是 3.5 m！這條路的車道寬是 {lw['median']:.4f} m，"
                          "推導與 config 都要重算。")
 
-    # ② 標線寬 → inner-to-inner
-    ii = _stats([r["inner_to_inner"] for r in prim])
-    mk = _stats([r["left_marking"]["width"] for r in prim
-                 if r.get("left_marking")] +
-                [r["right_marking"]["width"] for r in prim
-                 if r.get("right_marking")])
+    # ② 標線寬 → inner-to-inner（只採兩側都有真實標記的樣本；路口的 NONE
+    #    會讓 inner_to_inner 退化成 lane_width 本身，混進統計就是污染）
+    valid  = [r for r in prim if r.get("marking_valid")]
+    n_skip = len(prim) - len(valid)
+    ii = _stats([r["inner_to_inner"] for r in valid])
+    mk = _stats([r["left_marking"]["width"]  for r in valid] +
+                [r["right_marking"]["width"] for r in valid])
+    double = [r for r in valid if r.get("marking_double")]
     if ii is not None:
         out["inner_to_inner"] = ii
         out["marking_width"]  = mk
+        out["n_skipped_no_marking"] = n_skip
+        out["n_double_marking"]     = len(double)
         if mk is not None:
             lines.append(f"② 標線寬 median {mk['median']:.4f} m "
-                         f"(std {mk['std']:.4f}, n={mk['n']})")
+                         f"(std {mk['std']:.4f}, n={mk['n']})"
+                         + (f"   [略過 {n_skip} 幀無標記]" if n_skip else ""))
         lines.append(f"   inner-to-inner = lane_width - (l+r)/2 = "
                      f"{ii['median']:.4f} m (std {ii['std']:.4f})")
-        delta = ii["median"] - cfg_w
-        if abs(delta) <= _TOL_WIDTH_M:
-            lines.append(f"   → 與 config w_real={cfg_w} 相符（差 {delta:+.4f} m）。"
-                         "反推值直接被地圖證實。")
-        else:
-            lines.append(f"   → 與 config w_real={cfg_w} 不符（差 {delta:+.4f} m）。"
-                         "w_real 要改，且整批 MAE 基準需重跑。")
 
-    # ③ 相機高：三種量法
+        if double:
+            # 實測：SolidSolid（雙黃）與 Solid（單白）都回報 width=0.125，
+            # 也就是 .width 是「單條線寬」，不含第二條線也不含中間間隙。
+            # 因此上面那條公式在雙線那側**少扣**了 (間隙/2 + 一條線寬)，
+            # 算出來的 inner-to-inner 偏大。這不是量測誤差，是公式不適用。
+            types = sorted({m["type"] for r in double
+                            for m in (r["left_marking"], r["right_marking"])
+                            if m["type"] in _DOUBLE_MARKING_TYPES})
+            lines.append(f"   ⚠ 有 {len(double)}/{len(valid)} 幀是雙線標記"
+                         f"（{', '.join(types)}）。CARLA 的 .width 回報的是"
+                         "單條線寬，不含第二條與間隙，所以上面這個值在雙線那側"
+                         "**少扣**、偏大。**不可直接當成 w_real。**")
+            lines.append("      → 雙線路段請改以第④項反推：由直接量到的 h 與"
+                         "影像約束的 W/h 得到 W，再回頭推間隙。")
+        else:
+            delta = ii["median"] - cfg_w
+            if abs(delta) <= _TOL_WIDTH_M:
+                lines.append(f"   → 與 config w_real={cfg_w} 相符（差 {delta:+.4f} m）。"
+                             "反推值直接被地圖證實。")
+            else:
+                lines.append(f"   → 與 config w_real={cfg_w} 不符（差 {delta:+.4f} m）。"
+                             "w_real 要改，且整批 MAE 基準需重跑。")
+
+    # ③ 相機高：多種量法。主量測用 h_perp（去掉坡度假象）
+    h_perp   = _stats([r["h_perp"]   for r in prim])
     h_wp_cam = _stats([r["h_wp_cam"] for r in prim])
     h_wp_veh = _stats([r["h_wp_veh"] for r in prim])
     h_ray    = _stats([r["h_ray"]    for r in prim])
     h_proj   = _stats([r["h_proj"]   for r in prim])
-    out["height"] = {"wp_cam": h_wp_cam, "wp_veh": h_wp_veh,
+    out["height"] = {"perp": h_perp, "wp_cam": h_wp_cam, "wp_veh": h_wp_veh,
                      "ray": h_ray, "proj": h_proj}
 
-    # waypoint@camera 當主量測：它就是 OpenDRIVE 的路面高程，決定性且不依賴
-    # 射線 API 版本；cast_ray / ground_projection 當獨立交叉驗證（含路拱）
+    # h_perp 是主量測：cam_z − road_z 只是世界座標的垂直高差，針孔模型要的是
+    # 到路面的垂直距離，上坡時前者被 1/cos(θ) 放大。其餘量法留作交叉驗證。
     best, best_name = None, None
-    for cand, name in ((h_wp_cam, "waypoint@camera"), (h_ray, "cast_ray"),
+    for cand, name in ((h_perp, "waypoint@camera×cos(坡度)"),
+                       (h_wp_cam, "waypoint@camera"), (h_ray, "cast_ray"),
                        (h_proj, "ground_projection")):
         if cand is not None:
             best, best_name = cand, name
@@ -481,11 +529,19 @@ def _verdicts(records: list[dict], cfg: dict) -> tuple[list[str], dict]:
         out["height_primary"] = {"source": best_name, **best}
         lines.append(f"③ 相機到路面高度（採用 {best_name}）= "
                      f"{best['median']:.4f} m (std {best['std']:.4f}, n={best['n']})")
-        for cand, name in ((h_wp_cam, "waypoint@camera"), (h_ray, "cast_ray"),
-                           (h_proj, "ground_projection"), (h_wp_veh, "waypoint@vehicle")):
+        for cand, name in ((h_perp, "垂直距離(×cos坡度)"), (h_wp_cam, "垂直高差 cam_z-road_z"),
+                           (h_ray, "cast_ray"), (h_proj, "ground_projection"),
+                           (h_wp_veh, "waypoint@vehicle")):
             tag = "（無樣本，可能全被車身擋住或此版無此 API）" if cand is None else ""
             val = "—" if cand is None else f"{cand['median']:.4f} m"
-            lines.append(f"      {name:<20} {val} {tag}")
+            lines.append(f"      {name:<24} {val} {tag}")
+        if h_perp is not None and h_wp_cam is not None:
+            lines.append(f"      坡度修正讓 std 由 {h_wp_cam['std']:.4f} 收斂到 "
+                         f"{h_perp['std']:.4f} —— 收斂即證實原始值的變動是坡度假象")
+        if h_wp_veh is not None and h_perp is not None and \
+                abs(h_wp_veh["median"] - h_perp["median"]) > 0.05:
+            lines.append("      （waypoint@vehicle 在坡上本來就會偏大：相機前移 "
+                         f"{CAMERA_FWD_X} m，那裡的路面比車輛所在處高，僅供對照）")
         spread = [c["median"] for c in (h_wp_cam, h_ray, h_proj) if c is not None]
         if len(spread) > 1:
             lines.append(f"      三種量法全距 {max(spread) - min(spread):.4f} m"
@@ -507,20 +563,65 @@ def _verdicts(records: list[dict], cfg: dict) -> tuple[list[str], dict]:
     #    3.5/1.18 = 2.9660 只差 0.4%，兩個競爭假設都會通過這個檢查。
     #    真正定案拆法的是 ②（地圖直接給 W）和 ③（地圖直接給 h）。
     #    ④ 的作用只有一個：若比值和影像對不上，說明 ②③ 或掛載假設有問題。
-    if ii is not None and best is not None and best["median"] > 1e-6:
-        ratio = ii["median"] / best["median"]
-        out["measured_ratio"] = ratio
-        lines.append(f"④ 自洽檢查 W/h = {ii['median']:.4f} / {best['median']:.4f} "
-                     f"= {ratio:.4f}（影像約束值 {cfg_ratio:.4f}，"
-                     f"差 {ratio - cfg_ratio:+.4f}）")
-        if abs(ratio - cfg_ratio) <= _TOL_RATIO:
-            lines.append("   → 地圖幾何與影像量測自洽。（此項無法區分拆法 —— "
-                         "競爭假設 3.5/1.18=2.9660 只差 0.4%，也會通過。"
-                         "解除簡併靠的是 ② 與 ③ 的直接量測。）")
+    if best is not None and best["median"] > 1e-6:
+        # 直接量到 h 之後，影像的 W/h 就把 W 定死了 —— 這條路徑完全繞開
+        # 標線 .width 的語意問題，在雙線路段是唯一可信的 W
+        w_from_h = cfg_ratio * best["median"]
+        out["w_from_measured_h"] = w_from_h
+        lines.append(f"④ 由直接量到的 h 反推 W = {cfg_ratio:.4f} × "
+                     f"{best['median']:.4f} = {w_from_h:.4f} m"
+                     f"（config w_real={cfg_w}，差 {w_from_h - cfg_w:+.4f} m）")
+        if abs(w_from_h - cfg_w) <= _TOL_WIDTH_M:
+            lines.append("   → config 的 w_real 成立。h 是直接量的、W/h 是影像量的，"
+                         "兩者相乘不經過標線語意，所以這條推導最可信。")
         else:
-            lines.append(f"   → 地圖與影像矛盾（差 {ratio - cfg_ratio:+.4f}，"
-                         f"容差 {_TOL_RATIO}）。②③ 的結論先不要採用，"
-                         "回頭查 mount_mismatch、標線 .width 語意、是否量在路拱上。")
+            lines.append(f"   → 與 config 差 {w_from_h - cfg_w:+.4f} m 超過容差 "
+                         f"{_TOL_WIDTH_M}，w_real 要改，且整批 MAE 基準需重跑。")
+
+        if ii is not None:
+            ratio = ii["median"] / best["median"]
+            out["measured_ratio"] = ratio
+            lines.append(f"   對照：地圖 .width 公式給的 W/h = {ii['median']:.4f} / "
+                         f"{best['median']:.4f} = {ratio:.4f}"
+                         f"（影像約束值 {cfg_ratio:.4f}，差 {ratio - cfg_ratio:+.4f}）")
+            if abs(ratio - cfg_ratio) <= _TOL_RATIO:
+                lines.append("   → 兩條路徑一致。（注意比值本身分不出拆法 —— "
+                             "競爭假設 3.5/1.18=2.9660 只差 0.4%，也會通過。）")
+            elif double and lw is not None:
+                # 已知原因：雙線那側的 .width 少扣。把差額拆回幾何，驗證這個
+                # 解釋在物理上說不說得通。
+                #   total_sub   = lane_width − W          （兩側內縮總量）
+                #   單線側內縮  = 線寬/2
+                #   雙線側內縮  = total_sub − 單線側      = 間隙/2 + 線寬
+                w_dbl = _stats([m["width"] for r in double
+                                for m in (r["left_marking"], r["right_marking"])
+                                if m["type"] in _DOUBLE_MARKING_TYPES])
+                w_sgl = _stats([m["width"] for r in double
+                                for m in (r["left_marking"], r["right_marking"])
+                                if m["type"] not in _DOUBLE_MARKING_TYPES])
+                if w_dbl is not None and w_sgl is not None:
+                    total_sub = lw["median"] - w_from_h
+                    sub_sgl   = w_sgl["median"] / 2.0
+                    sub_dbl   = total_sub - sub_sgl
+                    gap       = 2.0 * (sub_dbl - w_dbl["median"])
+                    lines.append(
+                        f"   → 差額由第②項的雙線 .width 語意解釋。拆回幾何："
+                        f"兩側內縮總量 {total_sub:.4f} m，單線側 {sub_sgl:.4f} m，"
+                        f"故雙線側內縮 {sub_dbl:.4f} m = 間隙/2 + 線寬 "
+                        f"{w_dbl['median']:.4f} → 隱含間隙 {gap:.4f} m。")
+                    if 0.0 <= gap <= 0.4:
+                        lines.append("      間隙落在合理範圍，解釋成立。"
+                                     "以第④項的 W 為準。")
+                    else:
+                        lines.append(f"      ⚠ 隱含間隙 {gap:.4f} m 不合理，"
+                                     "雙線語意之外還有別的誤差來源，需再查。")
+                else:
+                    lines.append("   → 差額推測來自雙線 .width 語意，"
+                                 "但兩側都是雙線／都非雙線，無法拆回間隙。")
+            else:
+                lines.append(f"   → 地圖與影像矛盾（差 {ratio - cfg_ratio:+.4f}，"
+                             f"容差 {_TOL_RATIO}）且標線非雙線，無現成解釋。"
+                             "回頭查 mount_mismatch、是否量在路拱上。")
 
     # 額外：車身姿態 vs 路面坡度（第 2 組的動機證據）
     bp = _stats([r["body_pitch_deg"] for r in prim])
@@ -762,6 +863,8 @@ def _write_report(args: argparse.Namespace,
         L.append(_fmt_stats("lane_offset",      _stats([r["lane_offset_m"]  for r in sub])))
         L.append(_fmt_stats("lane_width",       _stats([r["lane_width"]     for r in sub])))
         L.append(_fmt_stats("inner_to_inner",   _stats([r["inner_to_inner"] for r in sub])))
+        L.append(_fmt_stats("h_perp (×cos坡度, 主值)",
+                            _stats([r.get("h_perp") for r in sub])))
         L.append(_fmt_stats("h_ray (cast_ray)", _stats([r["h_ray"]     for r in sub])))
         L.append(_fmt_stats("h_proj (ground)",  _stats([r["h_proj"]    for r in sub])))
         L.append(_fmt_stats("h_wp_cam",         _stats([r["h_wp_cam"]  for r in sub])))
