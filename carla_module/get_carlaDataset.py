@@ -52,7 +52,9 @@ import numpy as np
 # ── 相機規格（比照 get_data.py）────────────────────────────────────────────────
 IMG_WIDTH     = 1280
 IMG_HEIGHT    = 720
-CAMERA_HEIGHT = 1.08
+CAMERA_FOV    = 90.0
+CAMERA_HEIGHT = 1.08   # 相對「車輛原點」的掛載高度，車輛原點不一定在地面
+CAMERA_FWD_X  = 1.5    # 相機前移量：GT 距離記在車輛原點，推論端需用此值對齊
 PHYSICS_WARMUP_TICKS = 30   # 生成後讓物理系統落穩的預熱 tick 數
 
 
@@ -292,8 +294,8 @@ def main() -> None:
     cam_bp = bp_lib.find("sensor.camera.rgb")
     cam_bp.set_attribute("image_size_x", str(IMG_WIDTH))
     cam_bp.set_attribute("image_size_y", str(IMG_HEIGHT))
-    cam_bp.set_attribute("fov", "90")
-    cam_tf = carla.Transform(carla.Location(x=1.5, z=CAMERA_HEIGHT))
+    cam_bp.set_attribute("fov", str(CAMERA_FOV))
+    cam_tf = carla.Transform(carla.Location(x=CAMERA_FWD_X, z=CAMERA_HEIGHT))
     camera: carla.Sensor = world.spawn_actor(cam_bp, cam_tf, attach_to=vehicle)
 
     image_queue: queue.Queue = queue.Queue()
