@@ -5,7 +5,7 @@ CARLA 資料集蒐集腳本：蒐集 RGB 影像與 GT pitch／速度／行駛距
 使用方式：
     uv run python carla_module/get_carlaDataset.py [--host HOST] [--port PORT]
         [--speed KMH] [--camera-fps N] [--z-offset N]
-        [--align-frames N] [--warmup-frames N]
+        [--align-frames N] [--warmup-frames N] [--lookahead-m N]
         [--kp F] [--ki F] [--kd F] [--ff-gain F]
 
 狀態機流程：
@@ -13,9 +13,16 @@ CARLA 資料集蒐集腳本：蒐集 RGB 影像與 GT pitch／速度／行駛距
        ↓
     [ALIGNING]   TM autopilot 對齊車道（連續 --align-frames 幀 steer < 0.05）
        ↓
-    [WARMUP]     關閉 TM，PID+FF 控制直行，等 --warmup-frames 幀讓物理穩定
+    [WARMUP]     關閉 TM，PID+FF 控制 + pure-pursuit 橫向修正，等 --warmup-frames 幀讓物理穩定
        ↓
-    [COLLECTING] steer=0 PID+FF 控制，存圖 + GT 量測，按 'q' 停止
+    [COLLECTING] PID+FF 控制 + pure-pursuit 橫向修正，存圖 + GT 量測，按 'q' 停止
+
+    橫向控制說明：ALIGNING 只保證 TM 轉向輸出連續幾幀 < 0.05，不保證航向零
+    誤差；早期版本切到手動後直接 steer=0 寫死，假設接下來的路完全筆直，路
+    稍有彎或殘留航向誤差就會在整段收集距離上不受控漂移，可能跨到隔壁車道
+    （carla_module/verify_carla_geometry.py 的驗證報告第⑥項可以量出這個問題）。
+    現在改用 `_pure_pursuit_steer`（沿車道中心線前視 `--lookahead-m`，預設
+    6m）持續修正，縱向（throttle/brake）仍是同一套 PID+FF 不變。
 
 儲存路徑：根目錄 carla_dataset_{Map}_{YYYYMMDD_HHMMSS}/
     ├── images/  000000.png, 000001.png, ...
@@ -126,16 +133,13 @@ def _slope_feedforward(slope_deg: float, ff_gain: float) -> float:
     return float(max(0.0, math.sin(math.radians(slope_deg)) * ff_gain * 100))
 
 
-def apply_pid_ff_control(
+def _compute_pid_ff(
     vehicle:    carla.Vehicle,
     target_mps: float,
     pid:        PIDController,
     ff_gain:    float,
-) -> tuple[float, float]:
-    """
-    執行 PID + Feed-forward 定速控制，steer 固定為 0。
-    回傳 (當前速度 m/s, 坡度 °)。
-    """
+) -> tuple[float, float, float, float]:
+    """算 PID + Feed-forward 縱向控制量，不呼叫 apply_control。回傳 (throttle, brake, 當前速度 m/s, 坡度 °)。"""
     vel       = vehicle.get_velocity()
     speed     = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
     error     = target_mps - speed
@@ -152,6 +156,20 @@ def apply_pid_ff_control(
         throttle = 0.0
         brake    = min(1.0, abs(raw_output) * 0.6)
 
+    return throttle, brake, speed, slope_deg
+
+
+def apply_pid_ff_control(
+    vehicle:    carla.Vehicle,
+    target_mps: float,
+    pid:        PIDController,
+    ff_gain:    float,
+) -> tuple[float, float]:
+    """
+    執行 PID + Feed-forward 定速控制，steer 固定為 0。
+    回傳 (當前速度 m/s, 坡度 °)。
+    """
+    throttle, brake, speed, slope_deg = _compute_pid_ff(vehicle, target_mps, pid, ff_gain)
     vehicle.apply_control(carla.VehicleControl(
         throttle=throttle,
         steer=0.0,
@@ -159,6 +177,70 @@ def apply_pid_ff_control(
         hand_brake=False,
         manual_gear_shift=False,
     ))
+    return speed, slope_deg
+
+
+def _wrap_deg(angle: float) -> float:
+    """正規化角度差到 (-180, 180]，避免 0°/360° 之類的等價角度被算成 -360°。"""
+    return (angle + 180.0) % 360.0 - 180.0
+
+
+def _pure_pursuit_steer(vehicle: carla.Vehicle, carla_map: carla.Map,
+                        lookahead_m: float) -> float:
+    """
+    取代 `apply_pid_ff_control` 內建的 steer=0.0。ALIGNING 只保證 TM 轉向輸出
+    連續幾幀 < 0.05，不保證航向零誤差；WARMUP/COLLECTING 加起來往往是幾十到
+    上百公尺，路稍有彎或殘留一點航向誤差，steer=0 會讓車子不受控地橫向漂移，
+    可能跨到隔壁車道，把整批資料的 GT 對應關係搞錯。
+
+    做法：沿目前車道中心線往前 lookahead_m 找一個目標點，算目標點相對車頭
+    朝向的夾角，轉成 [-1, 1] 的 steer 修正量（簡化版 pure-pursuit）。
+    """
+    tf = vehicle.get_transform()
+    wp = carla_map.get_waypoint(tf.location, project_to_road=True)
+    if wp is None:
+        return 0.0
+    nxt = wp.next(lookahead_m)
+    if not nxt:
+        return 0.0
+    target = nxt[0].transform.location
+
+    fwd = tf.get_forward_vector()
+    heading      = math.degrees(math.atan2(fwd.y, fwd.x))
+    to_target_x  = target.x - tf.location.x
+    to_target_y  = target.y - tf.location.y
+    target_angle = math.degrees(math.atan2(to_target_y, to_target_x))
+
+    angle_err_deg = _wrap_deg(target_angle - heading)
+    # 經驗值：滿舵對應 ~30° 航向誤差，避免小誤差被過度放大造成震盪
+    return max(-1.0, min(1.0, angle_err_deg / 30.0))
+
+
+def apply_pid_ff_control_with_steering(
+    vehicle:     carla.Vehicle,
+    carla_map:   carla.Map,
+    target_mps:  float,
+    pid:         PIDController,
+    ff_gain:     float,
+    lookahead_m: float,
+) -> tuple[float, float]:
+    """
+    PID+FF 縱向 + pure-pursuit 橫向，同一輪算好後一次 apply_control 送出。
+
+    早期版本是「呼叫 apply_pid_ff_control 套用縱向控制 → 用 vehicle.get_control()
+    讀回來 → 疊加 steer → 再 apply_control 一次」，看似安全（CARLA 只認每個
+    tick 最後一次 apply_control），實際上有 race condition：同步模式下
+    get_control() 要等下一次 world.tick() 才會反映剛剛 apply_control() 送出的
+    值，讀回來的其實是上一輪的舊值。實測這會讓油門被舊值鎖住、車速衝過頭
+    （曾經衝到 37km/h，目標只有 18），才被大幅延遲的煞車拉回來變成 bang-bang
+    震盪。修法是完全不讀 get_control()，縱向/橫向控制量在這裡當場算好、
+    一次送出。
+    """
+    throttle, brake, speed, slope_deg = _compute_pid_ff(vehicle, target_mps, pid, ff_gain)
+    steer = _pure_pursuit_steer(vehicle, carla_map, lookahead_m)
+    vehicle.apply_control(carla.VehicleControl(
+        throttle=throttle, steer=steer, brake=brake,
+        hand_brake=False, manual_gear_shift=False))
     return speed, slope_deg
 
 
@@ -177,6 +259,9 @@ def parse_args() -> argparse.Namespace:
                    help="連續幾幀 steer<0.05 才視為對齊完成（預設：20）")
     p.add_argument("--warmup-frames", type=int,   default=10,
                    help="切換 TM→手動後再等幾幀才開始存檔（預設：10）")
+    p.add_argument("--lookahead-m",   type=float, default=6.0,
+                   help="pure-pursuit 橫向修正的前視距離（預設 6 m），"
+                        "取代寫死 steer=0 的假設")
     # ── PID + FF 參數（可在命令列覆寫）──────────────────────────────────────
     p.add_argument("--kp",      type=float, default=1.0,
                    help="PID 比例增益（預設 1.0，調大反應更快但易震盪）")
@@ -382,16 +467,16 @@ def main() -> None:
                     print(f"[{state}] TM 已關閉，等待 {args.warmup_frames} 幀物理穩定...")
 
             elif state == State.WARMUP:
-                speed_mps, slope_deg = apply_pid_ff_control(
-                    vehicle, TARGET_SPEED_MPS, pid, ff_gain)
+                speed_mps, slope_deg = apply_pid_ff_control_with_steering(
+                    vehicle, carla_map, TARGET_SPEED_MPS, pid, ff_gain, args.lookahead_m)
                 warmup_counter += 1
                 if warmup_counter >= args.warmup_frames:
                     state = State.COLLECTING
                     print(f"[{state}] 開始存檔！按 'q' 停止")
 
             elif state == State.COLLECTING:
-                speed_mps, slope_deg = apply_pid_ff_control(
-                    vehicle, TARGET_SPEED_MPS, pid, ff_gain)
+                speed_mps, slope_deg = apply_pid_ff_control_with_steering(
+                    vehicle, carla_map, TARGET_SPEED_MPS, pid, ff_gain, args.lookahead_m)
                 writer.save(image, transform, speed_mps, collect_distance_m)
 
             # ── 顯示視窗 ──────────────────────────────────────────────────────

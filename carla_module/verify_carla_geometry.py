@@ -25,14 +25,20 @@ carla_module/verify_carla_geometry.py
 
 量測分兩個階段，因為懸吊會壓縮：
     static  —— 手煞車停住、物理落穩後取樣（幾何理想值）
-    driving —— 用與 `get_carlaDataset.py` 完全相同的 TM 對齊 + PID+FF 定速行駛
-               取樣（資料集真正的拍攝條件，這才是該寫進 config 的值）
+    driving —— 用與 `get_carlaDataset.py` 完全相同的 TM 對齊 + PID+FF 定速 +
+               pure-pursuit 橫向修正行駛取樣（資料集真正的拍攝條件，這才是
+               該寫進 config 的值）。橫向修正（`apply_pid_ff_control_with_steering`
+               / `--lookahead-m`，預設 6m）取代寫死 `steer=0`——TM 對齊只保證
+               轉向輸出連續幾幀 < 0.05，不保證航向零誤差，取樣視窗有數十公尺，
+               路稍有彎或殘留航向誤差就會不受控漂移、可能跨到隔壁車道。報告
+               第⑥項印出 `lane_offset_m` 與經過的 `lane_id` 證明有沒有守住車道。
 
 使用方式（在跑 CARLA server 的那台機器上）
     uv run --no-sync python carla_module/verify_carla_geometry.py
         [--host HOST] [--port PORT] [--speed KMH] [--camera-fps N]
         [--spawn spectator|map] [--spawn-index N] [--z-offset N]
-        [--settle-frames N] [--drive-frames N] [--no-drive] [--out PATH]
+        [--settle-frames N] [--drive-frames N] [--lookahead-m N]
+        [--no-drive] [--out PATH]
 
     預設從 spectator 位置生成車輛（與 get_carlaDataset.py 相同），
     所以先把 CARLA 視窗的鏡頭移到要量的路面上。不需要顯示視窗、不存圖。
@@ -62,6 +68,7 @@ import datetime
 import json
 import math
 import statistics
+import time
 from typing import Any, Optional
 
 import carla
@@ -74,7 +81,7 @@ from carla_module.get_carlaDataset import (
     IMG_WIDTH,
     PHYSICS_WARMUP_TICKS,
     PIDController,
-    apply_pid_ff_control,
+    apply_pid_ff_control_with_steering,
 )
 
 _PROJECT_ROOT = pathlib.Path(__file__).parent.parent
@@ -118,12 +125,35 @@ def parse_args() -> argparse.Namespace:
                    help="TM→手動切換後等幾幀才開始取樣（預設 10）")
     p.add_argument("--no-drive", action="store_true",
                    help="只做 static 階段，不行駛")
+    p.add_argument("--lookahead-m", type=float, default=6.0,
+                   help="driving 階段 pure-pursuit 轉向修正的前視距離（預設 6 m）；"
+                        "取代寫死 steer=0 的假設，避免路稍有彎或 TM 對齊未完全歸零時"
+                        "在取樣視窗內持續橫向漂移")
+    p.add_argument("--time-scale", type=float, default=0.0,
+                   help="每個 tick 後額外 sleep 的倍率（預設 0＝不節流，同步模式"
+                        "算多快跑多快，畫面常常像快轉）。1.0＝真實時間播放速度，"
+                        "2.0＝一半速度（慢動作），方便肉眼確認車子有沒有開對。"
+                        "只影響畫面播放節奏，不影響量測數據（PID/物理仍以"
+                        "fixed_delta_seconds 為準）")
     p.add_argument("--out", default=None,
                    help="輸出檔前綴路徑（預設 output/carla_geometry_verification_<時間戳>）")
     return p.parse_args()
 
 
 # ── 小工具 ────────────────────────────────────────────────────────────────────
+
+def _tick(world: carla.World, dt: float, time_scale: float) -> None:
+    """
+    world.tick() + 選擇性節流。同步模式下 tick() 算完就回傳，不等真實時間，
+    伺服器算得比 dt 快就會變成視覺上的快轉。time_scale<=0 維持原行為（不節流，
+    量測用最快跑法）；>0 時額外 sleep(dt * time_scale) 讓畫面播放速度貼近真實
+    時間，純粹方便肉眼確認，不影響物理／PID（那些都是用 fixed_delta_seconds
+    這個模擬時間在算，跟這裡的 sleep 無關）。
+    """
+    world.tick()
+    if time_scale > 0.0:
+        time.sleep(dt * time_scale)
+
 
 def _setup_console() -> None:
     """
@@ -147,6 +177,11 @@ def _load_repo_config() -> dict:
     except Exception as exc:                                   # noqa: BLE001
         print(f"[警告] 讀不到 config，判定改用內建預期值：{exc}")
         return {}
+
+
+def _wrap_deg(angle: float) -> float:
+    """正規化角度差到 (-180, 180]，避免 0°/360° 之類的等價角度被算成 -360°。"""
+    return (angle + 180.0) % 360.0 - 180.0
 
 
 def _stats(values: list[Optional[float]]) -> Optional[dict]:
@@ -281,6 +316,8 @@ def _measure(world: carla.World,
         "h_ray":     None if ray_z  is None else cam_loc.z - ray_z,
         "h_proj":    None if proj_z is None else cam_loc.z - proj_z,
         "ray_label": ray_label,
+        # 車道中心線橫向偏移（證明 driving 階段有沒有漂出車道，見 _pure_pursuit_steer）
+        "lane_offset_m":  None,
         # 車道幾何
         "lane_width":     None,
         "inner_to_inner": None,
@@ -293,6 +330,11 @@ def _measure(world: carla.World,
 
     if wp_veh is not None:
         rec["h_wp_veh"] = cam_loc.z - float(wp_veh.transform.location.z)
+        # get_waypoint(project_to_road=True) 回傳車道中心線上最近點，
+        # 車輛位置到這個點的水平距離就是橫向（cross-track）偏移
+        rec["lane_offset_m"] = math.dist(
+            (veh_tf.location.x, veh_tf.location.y),
+            (wp_veh.transform.location.x, wp_veh.transform.location.y))
 
     if wp_cam is not None:
         rec["h_wp_cam"]       = cam_loc.z - float(wp_cam.transform.location.z)
@@ -486,7 +528,7 @@ def _verdicts(records: list[dict], cfg: dict) -> tuple[list[str], dict]:
     bp = _stats([r["body_pitch_deg"] for r in prim])
     rp = _stats([r["road_pitch_deg"] for r in prim])
     if bp is not None and rp is not None:
-        diff = _stats([r["body_pitch_deg"] - r["road_pitch_deg"] for r in prim
+        diff = _stats([_wrap_deg(r["body_pitch_deg"] - r["road_pitch_deg"]) for r in prim
                        if r["road_pitch_deg"] is not None])
         out["pitch"] = {"body": bp, "road": rp, "body_minus_road": diff}
         lines.append(f"⑤ 車身 pitch median {bp['median']:+.4f}° "
@@ -506,6 +548,24 @@ def _verdicts(records: list[dict], cfg: dict) -> tuple[list[str], dict]:
         if mm["max"] > 0.01:
             lines.append(f"⚠ camera.get_transform() 與手算掛載位置差 "
                          f"max {mm['max']:.4f} m —— 高度量測的前提要重新確認。")
+
+    # ⑥ driving 階段是否守在同一車道（pure-pursuit 修正是否真的有效）
+    if drive:
+        off = _stats([r["lane_offset_m"] for r in drive])
+        lane_ids = sorted({r["lane_id"] for r in drive if r["lane_id"] is not None})
+        out["lane_tracking"] = {"offset": off, "lane_ids": lane_ids}
+        if off is not None:
+            lines.append(f"⑥ driving 階段車道中心線橫向偏移 median {off['median']:.4f} m "
+                         f"(std {off['std']:.4f})   全距 [{off['min']:.4f}, {off['max']:.4f}] m"
+                         f"   經過 lane_id={lane_ids}")
+            if len(lane_ids) > 1:
+                lines.append("   → ⚠ driving 階段 lane_id 不只一個，車子中途換了車道／"
+                             "壓到對向車道，這批樣本混到不同車道的資料，不能直接採信。")
+            elif off["max"] > 0.5:
+                lines.append(f"   → ⚠ 最大偏移 {off['max']:.4f} m 偏大，"
+                             "考慮調小 --lookahead-m 讓修正更即時，或檢查對齊/路段是否有急彎。")
+            else:
+                lines.append("   → 全程守在同一車道、偏移量小，driving 階段的取樣位置可信。")
 
     return lines, out
 
@@ -552,10 +612,15 @@ def main() -> None:
     records:  list[dict] = []
     cam_info: dict       = {}
 
+    dt = 1.0 / args.camera_fps
+    if args.time_scale > 0.0:
+        print(f"[初始化] --time-scale={args.time_scale}：畫面節流到約真實時間的 "
+              f"{1.0 / args.time_scale:.2f}x，方便肉眼確認（不影響量測數據）")
+
     try:
         settings = world.get_settings()
         settings.synchronous_mode    = True
-        settings.fixed_delta_seconds = 1.0 / args.camera_fps
+        settings.fixed_delta_seconds = dt
         world.apply_settings(settings)
 
         tm = client.get_trafficmanager()
@@ -572,14 +637,14 @@ def main() -> None:
 
         print(f"[初始化] 物理預熱 {PHYSICS_WARMUP_TICKS} ticks...")
         for _ in range(PHYSICS_WARMUP_TICKS):
-            world.tick()
+            _tick(world, dt, args.time_scale)
 
         # ── static 階段：手煞車停住，量幾何理想值 ────────────────────────────
         print(f"[static] 停止取樣 {args.settle_frames} 幀（統計只取後半段）...")
         for i in range(args.settle_frames):
             vehicle.apply_control(carla.VehicleControl(
                 throttle=0.0, steer=0.0, brake=1.0, hand_brake=True))
-            world.tick()
+            _tick(world, dt, args.time_scale)
             records.append(_measure(world, carla_map, vehicle, camera, "static", i))
 
         # 前半段留給懸吊落穩，只保留後半段進統計
@@ -590,7 +655,7 @@ def main() -> None:
         # ── driving 階段：與資料集相同的 TM 對齊 + PID+FF 定速 ───────────────
         if not args.no_drive:
             target_mps = args.speed / 3.6
-            pid = PIDController(kp=1.0, ki=0.25, kd=0.15, dt=1.0 / args.camera_fps,
+            pid = PIDController(kp=1.0, ki=0.25, kd=0.15, dt=dt,
                                 integral_limit=3.0)
 
             # static 階段拉了手煞車，交給 TM 前先放掉
@@ -604,7 +669,7 @@ def main() -> None:
             print(f"[driving] TM 對齊車道中（需連續 {args.align_frames} 幀 steer<0.05）...")
             aligned = 0
             for _ in range(args.align_timeout_frames):
-                world.tick()
+                _tick(world, dt, args.time_scale)
                 aligned = aligned + 1 if abs(vehicle.get_control().steer) < 0.05 else 0
                 if aligned >= args.align_frames:
                     break
@@ -614,15 +679,17 @@ def main() -> None:
             vehicle.set_autopilot(False)
             pid.reset()
             for _ in range(args.warmup_frames):
-                apply_pid_ff_control(vehicle, target_mps, pid, 0.015)
-                world.tick()
+                apply_pid_ff_control_with_steering(
+                    vehicle, carla_map, target_mps, pid, 0.015, args.lookahead_m)
+                _tick(world, dt, args.time_scale)
 
             print(f"[driving] 開始取樣 {args.drive_frames} 幀 "
                   f"(@{args.speed} km/h ≈ {args.drive_frames / args.camera_fps:.1f} s "
                   f"≈ {args.speed / 3.6 * args.drive_frames / args.camera_fps:.0f} m)...")
             for i in range(args.drive_frames):
-                apply_pid_ff_control(vehicle, target_mps, pid, 0.015)
-                world.tick()
+                apply_pid_ff_control_with_steering(
+                    vehicle, carla_map, target_mps, pid, 0.015, args.lookahead_m)
+                _tick(world, dt, args.time_scale)
                 records.append(_measure(world, carla_map, vehicle, camera, "driving", i))
                 if (i + 1) % 100 == 0:
                     print(f"    ...{i + 1}/{args.drive_frames}")
@@ -694,6 +761,7 @@ def _write_report(args: argparse.Namespace,
         if not sub:
             continue
         L.append(f"  [{phase}] n={len(sub)}")
+        L.append(_fmt_stats("lane_offset",      _stats([r["lane_offset_m"]  for r in sub])))
         L.append(_fmt_stats("lane_width",       _stats([r["lane_width"]     for r in sub])))
         L.append(_fmt_stats("inner_to_inner",   _stats([r["inner_to_inner"] for r in sub])))
         L.append(_fmt_stats("h_ray (cast_ray)", _stats([r["h_ray"]     for r in sub])))
