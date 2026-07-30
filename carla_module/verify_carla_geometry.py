@@ -44,7 +44,7 @@ carla_module/verify_carla_geometry.py
     所以先把 CARLA 視窗的鏡頭移到要量的路面上。不需要顯示視窗、不存圖。
 
 輸出
-    console 報告 + `output/carla_geometry_verification_<時間戳>.{txt,json}`
+    console 報告 + `outputs/carla_geometry_verification_<時間戳>.{txt,json}`
     把這兩個檔帶回開發機即可。JSON 含每一幀的原始量測值。
 """
 
@@ -136,7 +136,7 @@ def parse_args() -> argparse.Namespace:
                         "只影響畫面播放節奏，不影響量測數據（PID/物理仍以"
                         "fixed_delta_seconds 為準）")
     p.add_argument("--out", default=None,
-                   help="輸出檔前綴路徑（預設 output/carla_geometry_verification_<時間戳>）")
+                   help="輸出檔前綴路徑（預設 outputs/carla_geometry_verification_<時間戳>）")
     return p.parse_args()
 
 
@@ -724,7 +724,7 @@ def _write_report(args: argparse.Namespace,
     _setup_console()
     ts     = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     prefix = (pathlib.Path(args.out) if args.out else
-              _PROJECT_ROOT / "output" / f"carla_geometry_verification_{ts}")
+              _PROJECT_ROOT / "outputs" / f"carla_geometry_verification_{ts}")
     prefix.parent.mkdir(parents=True, exist_ok=True)
 
     verdict_lines, verdict = _verdicts(records, cfg)

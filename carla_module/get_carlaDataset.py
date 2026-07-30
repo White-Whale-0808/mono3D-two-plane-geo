@@ -24,7 +24,7 @@ CARLA 資料集蒐集腳本：蒐集 RGB 影像與 GT pitch／速度／行駛距
     現在改用 `_pure_pursuit_steer`（沿車道中心線前視 `--lookahead-m`，預設
     6m）持續修正，縱向（throttle/brake）仍是同一套 PID+FF 不變。
 
-儲存路徑：根目錄 carla_dataset_{Map}_{YYYYMMDD_HHMMSS}/
+儲存路徑：outputs/carla_dataset_{Map}_{YYYYMMDD_HHMMSS}/
     ├── images/  000000.png, 000001.png, ...
     └── measurements.csv
 """
@@ -281,7 +281,7 @@ class DatasetWriter:
 
     def __init__(self, root: pathlib.Path, map_name: str) -> None:
         ts_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.save_dir = root / "output" / f"carla_dataset_{map_name}_{ts_str}"
+        self.save_dir = root / "outputs" / f"carla_dataset_{map_name}_{ts_str}"
         self.img_dir  = self.save_dir / "images"
         self.img_dir.mkdir(parents=True, exist_ok=True)
 
