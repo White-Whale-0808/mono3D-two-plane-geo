@@ -209,6 +209,24 @@ WWH-8 期間跑過的等價性測試是臨時腳本，沒有進版控。
 
 目的：直接驗證 `w_real = 3.216` 與 `camera_height = 1.08`，解除上述簡併。
 
+**工具已備好（2026-07-30）**：`carla_module/verify_carla_geometry.py`
+一支腳本涵蓋下面全部 4 項，在跑 CARLA server 的機器上執行：
+
+```bash
+uv run --no-sync python carla_module/verify_carla_geometry.py
+```
+
+先把 CARLA 視窗鏡頭移到要量的路面（與 `get_carlaDataset.py` 相同的生成方式），
+不需要顯示視窗也不存圖。分 static（手煞車、物理落穩）與 driving（TM 對齊 +
+PID+FF 定速 18 km/h，與資料集完全相同的條件）兩階段取樣，判定以 driving 為準。
+輸出 `output/carla_geometry_verification_<時間戳>.{txt,json}`，把這兩個檔帶回
+開發機即可（json 含每幀原始值）。
+
+判定的讀法（腳本會印，但這裡先講清楚免得誤讀）：**W/h 比值那一項不能用來
+判斷拆法** —— 3.216/1.08=2.9778 與 3.5/1.18=2.9660 只差 0.4%，兩個競爭假設都
+會通過比值檢查，那就是簡併本身。解除簡併靠的是 ②（地圖直接給 W）與
+③（地圖直接給 h）兩個直接量測；比值只是「地圖與影像有沒有互相矛盾」的自洽檢查。
+
 - [ ] **`waypoint.lane_width`** — 確認 CARLA 的 3.5 m 定義是**車道邊界中心到中心**
       ```python
       wp = world.get_map().get_waypoint(vehicle.get_location())
