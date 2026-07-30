@@ -159,27 +159,6 @@ def _compute_pid_ff(
     return throttle, brake, speed, slope_deg
 
 
-def apply_pid_ff_control(
-    vehicle:    carla.Vehicle,
-    target_mps: float,
-    pid:        PIDController,
-    ff_gain:    float,
-) -> tuple[float, float]:
-    """
-    執行 PID + Feed-forward 定速控制，steer 固定為 0。
-    回傳 (當前速度 m/s, 坡度 °)。
-    """
-    throttle, brake, speed, slope_deg = _compute_pid_ff(vehicle, target_mps, pid, ff_gain)
-    vehicle.apply_control(carla.VehicleControl(
-        throttle=throttle,
-        steer=0.0,
-        brake=brake,
-        hand_brake=False,
-        manual_gear_shift=False,
-    ))
-    return speed, slope_deg
-
-
 def _wrap_deg(angle: float) -> float:
     """正規化角度差到 (-180, 180]，避免 0°/360° 之類的等價角度被算成 -360°。"""
     return (angle + 180.0) % 360.0 - 180.0
@@ -188,7 +167,7 @@ def _wrap_deg(angle: float) -> float:
 def _pure_pursuit_steer(vehicle: carla.Vehicle, carla_map: carla.Map,
                         lookahead_m: float) -> float:
     """
-    取代 `apply_pid_ff_control` 內建的 steer=0.0。ALIGNING 只保證 TM 轉向輸出
+    取代早期版本寫死的 steer=0.0。ALIGNING 只保證 TM 轉向輸出
     連續幾幀 < 0.05，不保證航向零誤差；WARMUP/COLLECTING 加起來往往是幾十到
     上百公尺，路稍有彎或殘留一點航向誤差，steer=0 會讓車子不受控地橫向漂移，
     可能跨到隔壁車道，把整批資料的 GT 對應關係搞錯。
@@ -227,7 +206,7 @@ def apply_pid_ff_control_with_steering(
     """
     PID+FF 縱向 + pure-pursuit 橫向，同一輪算好後一次 apply_control 送出。
 
-    早期版本是「呼叫 apply_pid_ff_control 套用縱向控制 → 用 vehicle.get_control()
+    早期版本是「先送出縱向控制（steer 寫死 0）→ 用 vehicle.get_control()
     讀回來 → 疊加 steer → 再 apply_control 一次」，看似安全（CARLA 只認每個
     tick 最後一次 apply_control），實際上有 race condition：同步模式下
     get_control() 要等下一次 world.tick() 才會反映剛剛 apply_control() 送出的
