@@ -81,6 +81,7 @@ from carla_module.get_carlaDataset import (
     IMG_WIDTH,
     PHYSICS_WARMUP_TICKS,
     PIDController,
+    _wrap_deg,
     apply_pid_ff_control_with_steering,
 )
 
@@ -177,11 +178,6 @@ def _load_repo_config() -> dict:
     except Exception as exc:                                   # noqa: BLE001
         print(f"[警告] 讀不到 config，判定改用內建預期值：{exc}")
         return {}
-
-
-def _wrap_deg(angle: float) -> float:
-    """正規化角度差到 (-180, 180]，避免 0°/360° 之類的等價角度被算成 -360°。"""
-    return (angle + 180.0) % 360.0 - 180.0
 
 
 def _stats(values: list[Optional[float]]) -> Optional[dict]:
@@ -308,8 +304,10 @@ def _measure(world: carla.World,
         "veh_world": [veh_tf.location.x, veh_tf.location.y, veh_tf.location.z],
         "mount_mismatch_m": mount_mismatch,
         # 姿態：車身 vs 路面（第 2 組 road_pitch_deg 的證據）
-        "body_pitch_deg":  float(veh_tf.rotation.pitch),
-        "body_roll_deg":   float(veh_tf.rotation.roll),
+        # 一律 wrap 到 (-180, 180]：CARLA 的平路 waypoint pitch 實測會回 360.0，
+        # 不 wrap 的話原始統計那欄會印出「路面 pitch +360°」這種讀不懂的值
+        "body_pitch_deg":  _wrap_deg(float(veh_tf.rotation.pitch)),
+        "body_roll_deg":   _wrap_deg(float(veh_tf.rotation.roll)),
         # 高度：三種獨立量法
         "h_wp_cam":  None,
         "h_wp_veh":  None,
@@ -339,7 +337,7 @@ def _measure(world: carla.World,
     if wp_cam is not None:
         rec["h_wp_cam"]       = cam_loc.z - float(wp_cam.transform.location.z)
         rec["lane_width"]     = float(wp_cam.lane_width)
-        rec["road_pitch_deg"] = float(wp_cam.transform.rotation.pitch)
+        rec["road_pitch_deg"] = _wrap_deg(float(wp_cam.transform.rotation.pitch))
         rec["lane_id"]        = int(wp_cam.lane_id)
         rec["road_id"]        = int(wp_cam.road_id)
 
