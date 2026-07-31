@@ -7,8 +7,17 @@ carla_module/project_lane_gt.py
     - LaneMarking.width 是「單條線寬」：SolidSolid（雙黃）與 Solid（單白）都
       回報 0.125，不含第二條線也不含中間間隙
     - 相機到路面垂直距離 h = 1.0816 m（已做坡度修正）
-    - 影像約束 W/h = 2.9778 → 推得 inner-edge-to-inner-edge W = 3.2208 m
-    - config 的 w_real=3.216、camera_height=1.08 都成立，本腳本不改 config
+    - 邊界中心（lane_width/2 = 1.75）落在標線油漆的正中央，實測差 9 mm。
+      左側是雙黃線，所以 1.75 落在兩條黃線中間的**間隙中央**
+    - 以間隙 ≈ 標線寬 0.125 推得真實內緣：
+          左（雙黃）= 1.75 - (0.125 + 0.125/2) = 1.5625
+          右（單白）= 1.75 - 0.125/2           = 1.6875
+          inner-to-inner = 3.25
+      與 debug/measure_paint_edges.py 直接量到的 3.243~3.255 相符
+    - 但 config 仍維持 w_real=3.216：A/B 實測 3.245 會讓 batch MAE 由
+      0.2331 惡化到 0.2492（退步 388/451 幀）。w_real 只做尺度變換
+      （pitch 值不變、只移 z 軸），3.216 目前在補償 GT 距離軸的系統誤差。
+      本腳本不改 config
 
 這支腳本要回答的問題
     「地圖說的車道內側邊，到底落在影像的哪裡？」
@@ -58,7 +67,15 @@ carla_module/project_lane_gt.py
         [--spawn spectator|map] [--spawn-index N] [--z-offset N]
         [--sample-step-m N] [--sample-lookahead-m N] [--steer-lookahead-m N]
         [--align-frames N] [--align-timeout-frames N] [--warmup-frames N]
-        [--drive-frames N] [--w-real M] [--rows V1,V2,...] [--out-dir PATH]
+        [--drive-frames N] [--w-real M] [--double-gap-m M] [--lines A,B,C]
+        [--rows V1,V2,...] [--out-dir PATH]
+
+    --lines 預設只畫 center,map,perside 三組（最乾淨的判讀組合）：
+        center  參考基準
+        map     lane_width/2 = ±1.75，已驗證落在標線油漆的正中央（差 9 mm）
+        perside 真實內緣的預測位置，就是要看它貼不貼在漆緣上
+    需要對照舊的天真公式或對稱 w_real 時再加 naive / wreal。
+    挑線只影響目視，summary.json 的 row_widths 一律涵蓋全部線族。
 
     預設從 spectator 位置生成車輛，先把 CARLA 視窗鏡頭移到要看的路面。
 """
@@ -116,6 +133,16 @@ _COLOR_NAIVE  = (220, 220, 0)    # 青：天真內側邊（雙線側故意不修
 _COLOR_WREAL  = (220, 0, 220)    # 洋紅：config w_real（對稱畫，只驗間距不驗位置）
 _COLOR_PERSIDE = (0, 160, 0)     # 綠：逐側修正的真實內緣
 
+# --lines 可選的線族 → (欄位名, 顏色, 線寬)
+_LINE_GROUPS = ("center", "map", "naive", "wreal", "perside")
+_GROUP_SPEC = {
+    "center":  [("center",    _COLOR_CENTER,  1)],
+    "map":     [("map_l",     _COLOR_MAP,     2), ("map_r",     _COLOR_MAP,     2)],
+    "naive":   [("naive_l",   _COLOR_NAIVE,   2), ("naive_r",   _COLOR_NAIVE,   2)],
+    "wreal":   [("wreal_l",   _COLOR_WREAL,   2), ("wreal_r",   _COLOR_WREAL,   2)],
+    "perside": [("perside_l", _COLOR_PERSIDE, 2), ("perside_r", _COLOR_PERSIDE, 2)],
+}
+
 
 # ── 引數 ──────────────────────────────────────────────────────────────────────
 
@@ -154,10 +181,16 @@ def parse_args() -> argparse.Namespace:
                    help="覆寫 config 的 w_real（公尺）；不指定就讀 "
                         "config/inference_road_lane_segmentation.yaml 的 "
                         "pitch_estimation.w_real（讀不到用 3.216）")
-    p.add_argument("--double-gap-m", type=float, default=0.1834,
-                   help="雙線標記兩條線之間的間隙 (m)，第 5 組假設用。"
-                        "預設 0.1834 是 verify_carla_geometry.py 由 h 與影像 W/h "
-                        "反推出來的值，這支腳本就是要目視驗證它")
+    p.add_argument("--double-gap-m", type=float, default=0.125,
+                   help="雙線標記兩條線之間的間隙 (m)，per-side 線用。預設 0.125 "
+                        "（＝標線寬，目視估計）。此時 per-side 的間距 = 3.5 - "
+                        "(0.125/2+0.125) - 0.125/2 = 3.25，與量到的 3.243~3.255 相符。"
+                        "早期版本預設 0.1834 是在「渲染邊緣＝名目邊緣」的錯誤假設下"
+                        "反推的，已廢棄")
+    p.add_argument("--lines", default="center,map,perside",
+                   help="要畫哪幾組線，逗號分隔，可選 "
+                        f"{'/'.join(_LINE_GROUPS)}（預設 center,map,perside）。"
+                        "只影響目視，summary.json 的 row_widths 一律涵蓋全部")
     p.add_argument("--rows", default="380,420,460,500,540,580,620,660,700",
                    help="量第 3／第 4 組像素寬度的影像列（v 座標，逗號分隔）")
     p.add_argument("--out-dir", default=None,
@@ -291,6 +324,8 @@ def _hypothesis_points(wp: carla.Waypoint, w_real: float,
         "right_double": r_double,
         # 第 5 組隱含的內側邊到內側邊距離（不對稱，但總距離才是 w_real 該對上的量）
         "perside_width": per_left_dist + per_right_dist,
+        "per_left_dist":  per_left_dist,
+        "per_right_dist": per_right_dist,
     }
 
 
@@ -298,8 +333,13 @@ def _hypothesis_points(wp: carla.Waypoint, w_real: float,
 
 def _draw_polyline(frame: np.ndarray, world_pts: list[Optional[carla.Location]],
                    f: float, cx: float, cy: float, M: np.ndarray,
-                   color: tuple, thickness: int = 2) -> list[Optional[tuple[float, float]]]:
-    """投影＋畫線，回傳每點的影像座標（給 row-width 量測重複使用，不用重投影）。"""
+                   color: tuple, thickness: int = 2,
+                   draw: bool = True) -> list[Optional[tuple[float, float]]]:
+    """投影（＋選擇性畫線），回傳每點的影像座標。
+
+    draw=False 時只算座標不畫 —— 讓 --lines 挑線只影響目視，
+    summary.json 的 row_widths 仍然涵蓋所有線族。
+    """
     img_pts: list[Optional[tuple[float, float]]] = []
     prev: Optional[tuple[int, int]] = None
     for loc in world_pts:
@@ -307,45 +347,54 @@ def _draw_polyline(frame: np.ndarray, world_pts: list[Optional[carla.Location]],
         img_pts.append(p)
         if p is not None:
             pt = (int(round(p[0])), int(round(p[1])))
-            cv2.circle(frame, pt, 2, color, -1, cv2.LINE_AA)
-            if prev is not None:
-                cv2.line(frame, prev, pt, color, thickness, cv2.LINE_AA)
+            if draw:
+                cv2.circle(frame, pt, 2, color, -1, cv2.LINE_AA)
+                if prev is not None:
+                    cv2.line(frame, prev, pt, color, thickness, cv2.LINE_AA)
             prev = pt
         else:
             prev = None
     return img_pts
 
 
-def _draw_legend(frame: np.ndarray, w_real: float) -> None:
+def _legend_text(name: str, hyp: dict, w_real: float, gap: float) -> str:
+    half = hyp["lane_width"] / 2.0
+    return {
+        "center":  "center line   offset=0",
+        "map":     f"lane_width={hyp['lane_width']:.3f}  offset=+-{half:.4f}",
+        "naive":   "naive inner   offset=+-(lane_width/2 - marking.width/2)",
+        "wreal":   f"w_real={w_real:.3f} SYMMETRIC  offset=+-{w_real/2:.4f}  "
+                   "(spacing only)",
+        "perside": f"per-side inner edge (gap={gap:.3f})  "
+                   f"L=-{half - hyp['per_left_dist']:.4f}  "
+                   f"R=-{half - hyp['per_right_dist']:.4f}  "
+                   f"spacing={hyp['perside_width']:.4f}",
+    }[name]
+
+
+def _draw_legend(frame: np.ndarray, hyp: dict, w_real: float, gap: float,
+                 groups: tuple[str, ...]) -> None:
     font = cv2.FONT_HERSHEY_SIMPLEX
-    lines = [
-        ("1) center line  offset=0", _COLOR_CENTER),
-        ("2) map boundary  offset=+-lane_width/2", _COLOR_MAP),
-        ("3) naive inner (uncorrected on double-marking side)  "
-         "offset=+-(lane_width/2-marking.width/2)", _COLOR_NAIVE),
-        (f"4) config w_real={w_real:.3f}m  offset=+-w_real/2  "
-         "(symmetric: checks SPACING, not position)", _COLOR_WREAL),
-        ("5) per-side corrected inner edge (double: width+gap/2, single: width/2)  "
-         "-- ASYMMETRIC", _COLOR_PERSIDE),
-    ]
-    for i, (text, color) in enumerate(lines):
-        cv2.putText(frame, text, (10, 24 + i * 22), font, 0.55, color, 2, cv2.LINE_AA)
+    colors = {g: _GROUP_SPEC[g][0][1] for g in _LINE_GROUPS}
+    for i, name in enumerate(groups):
+        cv2.putText(frame, f"{i+1}) {_legend_text(name, hyp, w_real, gap)}",
+                    (10, 24 + i * 22), font, 0.55, colors[name], 2, cv2.LINE_AA)
 
 
 def _draw_frame(frame: np.ndarray, hyps: list[dict], f: float, cx: float, cy: float,
-                M: np.ndarray, w_real: float) -> dict[str, list[Optional[tuple[float, float]]]]:
-    """畫一幀所有假設線，回傳各條線的影像座標（供量 row-width 用）。"""
+                M: np.ndarray, w_real: float, gap: float,
+                groups: tuple[str, ...]) -> dict[str, list[Optional[tuple[float, float]]]]:
+    """畫選定的假設線，回傳**所有**線族的影像座標（供量 row-width 用）。
+
+    未選中的線族仍照算座標、只是不畫，所以 --lines 只影響目視，
+    summary.json 的數據不受影響。
+    """
     img: dict[str, list[Optional[tuple[float, float]]]] = {}
-    img["center"]  = _draw_polyline(frame, [h["center"]  for h in hyps], f, cx, cy, M, _COLOR_CENTER, 1)
-    img["map_l"]   = _draw_polyline(frame, [h["map_l"]   for h in hyps], f, cx, cy, M, _COLOR_MAP,    2)
-    img["map_r"]   = _draw_polyline(frame, [h["map_r"]   for h in hyps], f, cx, cy, M, _COLOR_MAP,    2)
-    img["naive_l"] = _draw_polyline(frame, [h["naive_l"] for h in hyps], f, cx, cy, M, _COLOR_NAIVE,  2)
-    img["naive_r"] = _draw_polyline(frame, [h["naive_r"] for h in hyps], f, cx, cy, M, _COLOR_NAIVE,  2)
-    img["wreal_l"] = _draw_polyline(frame, [h["wreal_l"] for h in hyps], f, cx, cy, M, _COLOR_WREAL,  2)
-    img["wreal_r"] = _draw_polyline(frame, [h["wreal_r"] for h in hyps], f, cx, cy, M, _COLOR_WREAL,  2)
-    img["perside_l"] = _draw_polyline(frame, [h["perside_l"] for h in hyps], f, cx, cy, M, _COLOR_PERSIDE, 2)
-    img["perside_r"] = _draw_polyline(frame, [h["perside_r"] for h in hyps], f, cx, cy, M, _COLOR_PERSIDE, 2)
-    _draw_legend(frame, w_real)
+    for group, entries in _GROUP_SPEC.items():
+        for key, color, thick in entries:
+            img[key] = _draw_polyline(frame, [h[key] for h in hyps], f, cx, cy, M,
+                                      color, thick, draw=group in groups)
+    _draw_legend(frame, hyps[0], w_real, gap, groups)
 
     near = hyps[0]
     cv2.putText(frame,
@@ -403,6 +452,12 @@ def main() -> None:
     args   = parse_args()
     w_real = _load_w_real(args.w_real)
     rows   = [int(x) for x in args.rows.split(",") if x.strip()]
+    groups = tuple(g.strip() for g in args.lines.split(",") if g.strip())
+    bad    = [g for g in groups if g not in _LINE_GROUPS]
+    if bad:
+        raise SystemExit(f"--lines 有無效的線族 {bad}，可選：{list(_LINE_GROUPS)}")
+    print(f"[初始化] 畫出的線族：{', '.join(groups)}"
+          f"（雙線間隙 {args.double_gap_m} m）")
     print(f"[初始化] w_real={w_real:.4f} m（{'命令列覆寫' if args.w_real is not None else '讀自 config'}）")
 
     client = carla.Client(args.host, args.port)
@@ -540,7 +595,8 @@ def main() -> None:
             cv2.imwrite(str(clean_dir / png_name), frame_bgr)
 
             M = np.array(cam_tf_now.get_inverse_matrix())
-            img_lines = _draw_frame(frame_bgr, hyps, f, cx, cy, M, w_real)
+            img_lines = _draw_frame(frame_bgr, hyps, f, cx, cy, M, w_real,
+                                    args.double_gap_m, groups)
             cv2.imwrite(str(img_dir / png_name), frame_bgr)
 
             near = hyps[0]
