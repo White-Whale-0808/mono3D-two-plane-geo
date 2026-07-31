@@ -97,6 +97,7 @@ from carla_module.get_carlaDataset import (
     IMG_WIDTH,
     PHYSICS_WARMUP_TICKS,
     PIDController,
+    _wrap_deg,
     apply_pid_ff_control_with_steering,
 )
 
@@ -107,10 +108,13 @@ _PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 # 不含第二條線也不含中間間隙——第 3 組「天真內側邊」在這種標記上會失準
 _DOUBLE_MARKING_TYPES = {"SolidSolid", "BrokenBroken", "SolidBroken", "BrokenSolid"}
 
-_COLOR_CENTER = (255, 255, 255)  # 白：車道中心線
-_COLOR_MAP    = (0, 220, 220)    # 黃：邊界中心 ±lane_width/2
+# 顏色刻意避開路面油漆本身的顏色（白線、黃線）——第一版用黃色畫邊界中心，
+# 結果整條線疊在雙黃漆上，正好把最需要判讀的那一側蓋掉，量不出東西
+_COLOR_CENTER = (160, 160, 160)  # 灰：車道中心線
+_COLOR_MAP    = (255, 80, 0)     # 藍：邊界中心 ±lane_width/2
 _COLOR_NAIVE  = (220, 220, 0)    # 青：天真內側邊（雙線側故意不修正）
-_COLOR_WREAL  = (220, 0, 220)    # 洋紅：config w_real
+_COLOR_WREAL  = (220, 0, 220)    # 洋紅：config w_real（對稱畫，只驗間距不驗位置）
+_COLOR_PERSIDE = (0, 160, 0)     # 綠：逐側修正的真實內緣
 
 
 # ── 引數 ──────────────────────────────────────────────────────────────────────
@@ -150,6 +154,10 @@ def parse_args() -> argparse.Namespace:
                    help="覆寫 config 的 w_real（公尺）；不指定就讀 "
                         "config/inference_road_lane_segmentation.yaml 的 "
                         "pitch_estimation.w_real（讀不到用 3.216）")
+    p.add_argument("--double-gap-m", type=float, default=0.1834,
+                   help="雙線標記兩條線之間的間隙 (m)，第 5 組假設用。"
+                        "預設 0.1834 是 verify_carla_geometry.py 由 h 與影像 W/h "
+                        "反推出來的值，這支腳本就是要目視驗證它")
     p.add_argument("--rows", default="380,420,460,500,540,580,620,660,700",
                    help="量第 3／第 4 組像素寬度的影像列（v 座標，逗號分隔）")
     p.add_argument("--out-dir", default=None,
@@ -230,7 +238,8 @@ def _lane_samples(carla_map: carla.Map, start_wp: carla.Waypoint,
     return samples
 
 
-def _hypothesis_points(wp: carla.Waypoint, w_real: float) -> dict:
+def _hypothesis_points(wp: carla.Waypoint, w_real: float,
+                       double_gap_m: float) -> dict:
     """單一 waypoint 的四組假設世界座標 + 標線 metadata。"""
     tf    = wp.transform
     loc   = tf.location
@@ -247,6 +256,19 @@ def _hypothesis_points(wp: carla.Waypoint, w_real: float) -> dict:
     naive_right_dist = half_lane - right_w / 2.0
     half_w_real = w_real / 2.0
 
+    # 第 5 組：逐側修正的真實內緣。單線側內縮 = 線寬/2；雙線側內縮 =
+    # 間隙/2 + 一整條線寬（因為 .width 只算單條，邊界中心在兩條線之間）。
+    # 這組是不對稱的 —— 這正是重點：真實內緣本來就不對稱於車道中心，
+    # 所以第 4 組那種 ±w_real/2 的對稱畫法永遠不可能同時壓在兩側漆上。
+    # 第 4 組驗的是「兩線間距」，第 5 組才驗「位置」。
+    def _inner_dist(width: float, is_double: bool) -> float:
+        return half_lane - (width + double_gap_m / 2.0 if is_double else width / 2.0)
+
+    l_double = bool(left_m  and left_m["type"]  in _DOUBLE_MARKING_TYPES)
+    r_double = bool(right_m and right_m["type"] in _DOUBLE_MARKING_TYPES)
+    per_left_dist  = _inner_dist(left_w,  l_double)
+    per_right_dist = _inner_dist(right_w, r_double)
+
     def _offset(dist: float) -> carla.Location:
         return carla.Location(x=loc.x + right.x * dist,
                               y=loc.y + right.y * dist,
@@ -260,11 +282,15 @@ def _hypothesis_points(wp: carla.Waypoint, w_real: float) -> dict:
         "naive_r":  _offset(naive_right_dist),
         "wreal_l":  _offset(-half_w_real),
         "wreal_r":  _offset(half_w_real),
+        "perside_l": _offset(-per_left_dist),
+        "perside_r": _offset(per_right_dist),
         "lane_width":   wp.lane_width,
         "left_marking":  left_m,
         "right_marking": right_m,
-        "left_double":  bool(left_m  and left_m["type"]  in _DOUBLE_MARKING_TYPES),
-        "right_double": bool(right_m and right_m["type"] in _DOUBLE_MARKING_TYPES),
+        "left_double":  l_double,
+        "right_double": r_double,
+        # 第 5 組隱含的內側邊到內側邊距離（不對稱，但總距離才是 w_real 該對上的量）
+        "perside_width": per_left_dist + per_right_dist,
     }
 
 
@@ -297,7 +323,10 @@ def _draw_legend(frame: np.ndarray, w_real: float) -> None:
         ("2) map boundary  offset=+-lane_width/2", _COLOR_MAP),
         ("3) naive inner (uncorrected on double-marking side)  "
          "offset=+-(lane_width/2-marking.width/2)", _COLOR_NAIVE),
-        (f"4) config w_real={w_real:.3f}m  offset=+-w_real/2", _COLOR_WREAL),
+        (f"4) config w_real={w_real:.3f}m  offset=+-w_real/2  "
+         "(symmetric: checks SPACING, not position)", _COLOR_WREAL),
+        ("5) per-side corrected inner edge (double: width+gap/2, single: width/2)  "
+         "-- ASYMMETRIC", _COLOR_PERSIDE),
     ]
     for i, (text, color) in enumerate(lines):
         cv2.putText(frame, text, (10, 24 + i * 22), font, 0.55, color, 2, cv2.LINE_AA)
@@ -314,6 +343,8 @@ def _draw_frame(frame: np.ndarray, hyps: list[dict], f: float, cx: float, cy: fl
     img["naive_r"] = _draw_polyline(frame, [h["naive_r"] for h in hyps], f, cx, cy, M, _COLOR_NAIVE,  2)
     img["wreal_l"] = _draw_polyline(frame, [h["wreal_l"] for h in hyps], f, cx, cy, M, _COLOR_WREAL,  2)
     img["wreal_r"] = _draw_polyline(frame, [h["wreal_r"] for h in hyps], f, cx, cy, M, _COLOR_WREAL,  2)
+    img["perside_l"] = _draw_polyline(frame, [h["perside_l"] for h in hyps], f, cx, cy, M, _COLOR_PERSIDE, 2)
+    img["perside_r"] = _draw_polyline(frame, [h["perside_r"] for h in hyps], f, cx, cy, M, _COLOR_PERSIDE, 2)
     _draw_legend(frame, w_real)
 
     near = hyps[0]
@@ -348,10 +379,20 @@ def _row_widths(img: dict[str, list[Optional[tuple[float, float]]]],
         u_naive_r = _interp_u_at_v(img["naive_r"], v)
         u_wreal_l = _interp_u_at_v(img["wreal_l"], v)
         u_wreal_r = _interp_u_at_v(img["wreal_r"], v)
+        u_per_l   = _interp_u_at_v(img["perside_l"], v)
+        u_per_r   = _interp_u_at_v(img["perside_r"], v)
         width3 = (u_naive_r - u_naive_l) if None not in (u_naive_l, u_naive_r) else None
         width4 = (u_wreal_r - u_wreal_l) if None not in (u_wreal_l, u_wreal_r) else None
+        width5 = (u_per_r - u_per_l)     if None not in (u_per_l,   u_per_r)   else None
         diff   = (width3 - width4) if None not in (width3, width4) else None
-        out.append({"row": v, "width3_px": width3, "width4_px": width4, "diff_px": diff})
+        # 第 4 與第 5 的「間距」若一致，就證明 w_real 這個數字對，
+        # 差別只在對稱與否（位置），那對 pipeline 的深度估計無影響
+        d45    = (width5 - width4) if None not in (width4, width5) else None
+        out.append({"row": v, "width3_px": width3, "width4_px": width4,
+                    "width5_px": width5, "diff_px": diff, "diff45_px": d45,
+                    "u_naive_l": u_naive_l, "u_naive_r": u_naive_r,
+                    "u_wreal_l": u_wreal_l, "u_wreal_r": u_wreal_r,
+                    "u_perside_l": u_per_l, "u_perside_r": u_per_r})
     return out
 
 
@@ -398,8 +439,10 @@ def main() -> None:
     ts       = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     out_root = pathlib.Path(args.out_dir) if args.out_dir else \
         _PROJECT_ROOT / "outputs" / "lane_gt_overlay" / f"{map_name}_{ts}"
-    img_dir  = out_root / "images"
+    img_dir   = out_root / "images"
+    clean_dir = out_root / "images_clean"
     img_dir.mkdir(parents=True, exist_ok=True)
+    clean_dir.mkdir(parents=True, exist_ok=True)
     print(f"[初始化] 輸出目錄：{out_root}")
 
     original_settings = world.get_settings()
@@ -485,14 +528,19 @@ def main() -> None:
                 continue
 
             samples = _lane_samples(carla_map, start_wp, args.sample_step_m, args.sample_lookahead_m)
-            hyps    = [_hypothesis_points(wp, w_real) for wp in samples]
+            hyps    = [_hypothesis_points(wp, w_real, args.double_gap_m)
+                       for wp in samples]
 
             frame_bgr = np.frombuffer(image.raw_data, dtype=np.uint8) \
                 .reshape((image.height, image.width, 4))[:, :, :3].copy()
-            M = np.array(cam_tf_now.get_inverse_matrix())
-            img_lines = _draw_frame(frame_bgr, hyps, f, cx, cy, M, w_real)
 
             png_name = f"{i:06d}.png"
+            # 先存一份沒有任何疊圖的乾淨原圖。疊圖的線正好畫在要判讀的漆緣上，
+            # 只有疊圖版就沒辦法量油漆的實際邊緣位置（第一版就卡在這）
+            cv2.imwrite(str(clean_dir / png_name), frame_bgr)
+
+            M = np.array(cam_tf_now.get_inverse_matrix())
+            img_lines = _draw_frame(frame_bgr, hyps, f, cx, cy, M, w_real)
             cv2.imwrite(str(img_dir / png_name), frame_bgr)
 
             near = hyps[0]
@@ -500,14 +548,17 @@ def main() -> None:
             frame_records.append({
                 "frame_idx": i,
                 "png": f"images/{png_name}",
+                "png_clean": f"images_clean/{png_name}",
                 "cam_world": [cam_tf_now.location.x, cam_tf_now.location.y, cam_tf_now.location.z],
                 "veh_world": [veh_tf.location.x, veh_tf.location.y, veh_tf.location.z],
-                "road_pitch_deg": start_wp.transform.rotation.pitch,
+                # CARLA 平路的 waypoint pitch 會回 360.0 而不是 0.0，一律 wrap
+                "road_pitch_deg": _wrap_deg(float(start_wp.transform.rotation.pitch)),
                 "lane_width":     near["lane_width"],
                 "left_marking":   near["left_marking"],
                 "right_marking":  near["right_marking"],
                 "left_double":    near["left_double"],
                 "right_double":   near["right_double"],
+                "perside_width_m": near["perside_width"],
                 "row_widths":     _row_widths(img_lines, rows),
             })
 
@@ -541,14 +592,18 @@ def main() -> None:
         "w_real": w_real,
         "camera": {"fov_deg": CAMERA_FOV, "width": IMG_WIDTH, "height": IMG_HEIGHT,
                    "forward_x": CAMERA_FWD_X, "height_m": CAMERA_HEIGHT},
+        "double_gap_m": args.double_gap_m,
         "offsets_legend": {
             "map_boundary": "±lane_width/2",
             "naive_inner":  "±(lane_width/2 - marking.width/2)  [雙線側未修正，故意的]",
-            "config_w_real": "±w_real/2",
+            "config_w_real": "±w_real/2（對稱：只驗兩線間距，不驗位置）",
+            "per_side":     "雙線側 lane_width/2-(width+gap/2)、單線側 "
+                            "lane_width/2-width/2（不對稱：驗位置）",
         },
         "frames": frame_records,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[輸出] {img_dir}  ({len(frame_records)} 張 PNG)")
+    print(f"[輸出] {img_dir}        ({len(frame_records)} 張疊圖 PNG)")
+    print(f"[輸出] {clean_dir}  ({len(frame_records)} 張乾淨原圖，量漆緣用這個)")
     print(f"[輸出] {summary_path}")
 
 
