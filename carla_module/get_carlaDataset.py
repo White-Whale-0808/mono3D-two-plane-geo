@@ -25,8 +25,16 @@ CARLA 資料集蒐集腳本：蒐集 RGB 影像與 GT pitch／速度／行駛距
     6m）持續修正，縱向（throttle/brake）仍是同一套 PID+FF 不變。
 
 儲存路徑：outputs/carla_dataset_{Map}_{YYYYMMDD_HHMMSS}/
-    ├── images/  000000.png, 000001.png, ...
-    └── measurements.csv
+    ├── images/         000000.png, 000001.png, ...
+    ├── measurements.csv  逐幀：車身姿態 / 路面姿態 / 速度 / 距離 / 車輛與相機世界座標
+    ├── road_profile.csv  逐幀 × 逐採樣點：相機前方路面的世界座標（採集當下直接問地圖）
+    └── metadata.json     相機掛載參數、fov、解析度、地圖名、採集設定
+
+GT 的設計原則：**存最生的量，之後再推導**。前方剖面存 waypoint 的世界座標而
+不是預先算好的 pitch，相機存完整 transform 而不是只有位置 —— 這樣「沿光軸的
+深度」「高度剖面」「相對哪個座標系的 pitch」都能離線重算，不必為了換一種
+推導方式而重採。詳見 DatasetWriter 與 sample_road_profile 的 docstring，
+以及 to-do.md 第 2/3 組。
 """
 
 import os
@@ -47,6 +55,7 @@ if _whl:
 import argparse
 import csv
 import datetime
+import json
 import math
 import queue
 from typing import Optional
@@ -141,7 +150,7 @@ def _compute_pid_ff(
 ) -> tuple[float, float, float, float]:
     """算 PID + Feed-forward 縱向控制量，不呼叫 apply_control。回傳 (throttle, brake, 當前速度 m/s, 坡度 °)。"""
     vel       = vehicle.get_velocity()
-    speed     = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
+    speed     = vel.length()
     error     = target_mps - speed
     slope_deg = _get_slope_deg(vehicle)
 
@@ -193,6 +202,49 @@ def _pure_pursuit_steer(vehicle: carla.Vehicle, carla_map: carla.Map,
     angle_err_deg = _wrap_deg(target_angle - heading)
     # 經驗值：滿舵對應 ~30° 航向誤差，避免小誤差被過度放大造成震盪
     return max(-1.0, min(1.0, angle_err_deg / 30.0))
+
+
+# ── 前方路面剖面（採集當下直接問地圖）──────────────────────────────────────────
+
+_PROFILE_MAX_D_M = 50.0   # 採樣到相機前方幾公尺（略大於 pitch_estimation 的 z_cap 45）
+_PROFILE_STEP_M  = 1.0    # 採樣間距
+
+def sample_road_profile(
+    carla_map:  carla.Map,
+    cam_loc:    carla.Location,
+    max_d_m:    float = _PROFILE_MAX_D_M,
+    step_m:     float = _PROFILE_STEP_M,
+) -> list[tuple[float, carla.Waypoint]]:
+    """相機前方路面剖面：沿車道往前走，回傳 (要求距離, waypoint) 序列。
+
+    取代「用行駛歷史回推前方 GT」的做法（`pitch_visualization.gt_pitch_profile`
+    是拿車子後來開到那裡時的 pitch 當前方 GT）。歷史回推有三個問題：車身/懸吊
+    的遲滯（實測 body = 1.0213 x road - 0.48 度，且逐坡度帶差值不是常數）、
+    前移量的對齊、以及開到終點的幀沒有前方 GT。直接問地圖三者一次消失。
+
+    起點是**相機所在處**而非車輛所在處：相機前移 CAMERA_FWD_X = 1.5 m，
+    在 9.5 度坡上那裡的路面高 0.25 m，用車輛 waypoint 會系統性量錯
+    （見 carla_module/verify_carla_geometry.py 的第 1 組驗證）。
+
+    逐步走而不是直接 `wp.next(d)`：後者在路口會分岔，且每次都從頭走一遍。
+    分岔時選航向最接近前一段的分支，避免剖面拐進岔路。
+    """
+    wp = carla_map.get_waypoint(cam_loc, project_to_road=True)
+    if wp is None:
+        return []
+
+    out = [(0.0, wp)]
+    prev_fwd = wp.transform.get_forward_vector()
+    d = 0.0
+    while d < max_d_m - 1e-6:
+        nxts = wp.next(step_m)
+        if not nxts:
+            break   # 路盡頭：剖面就到此為止，不猜測
+        wp = max(nxts, key=lambda w: w.transform.get_forward_vector().dot(prev_fwd))
+        prev_fwd = wp.transform.get_forward_vector()
+        d += step_m
+        out.append((d, wp))
+    return out
 
 
 def apply_pid_ff_control_with_steering(
@@ -256,9 +308,39 @@ def parse_args() -> argparse.Namespace:
 # ── 資料集寫入器 ───────────────────────────────────────────────────────────────
 
 class DatasetWriter:
-    _CSV_HEADER = ["frame_id", "gt_pitch_deg", "gt_speed_mps", "collect_dist_m"]
+    """資料集寫入器：影像 + 逐幀量測 + 前方路面剖面 + 掛載中繼資料。
 
-    def __init__(self, root: pathlib.Path, map_name: str) -> None:
+    設計原則是**存最生的量，之後再推導**。前方剖面存 waypoint 的世界座標
+    (x, y, z) 而不是預先算好的 pitch —— 存 pitch 會把「相對哪個座標系」這個
+    選擇燒死在資料裡，選錯就得重採；存世界座標的話，深度／高度剖面／pitch
+    都能離線重算，連「弧長 vs 沿光軸深度」這種問題都變成算術而非假說。
+    同理相機存的是完整 transform（位置 + 旋轉）而非只有位置：pipeline 的 z
+    是沿光軸的距離，光軸方向由相機旋轉定義。
+    """
+
+    _CSV_HEADER = [
+        "frame_id",
+        # 車身姿態（含懸吊）—— 原有欄位，語意與名稱刻意不變，舊工具仍可讀
+        "gt_pitch_deg",
+        "gt_speed_mps",
+        "collect_dist_m",
+        # 路面姿態（相機所在處）—— 與車身分開記，才能量化懸吊造成的誤差。
+        # 實測 body = 1.0213 x road - 0.48 度，車身振幅超出 2.13%
+        "road_pitch_deg",
+        "body_roll_deg",
+        # 世界座標：有了它才能直接重建高度剖面，取代「積分 tan(pitch)」的近似
+        "veh_x", "veh_y", "veh_z",
+        "cam_x", "cam_y", "cam_z",
+        "cam_pitch_deg", "cam_yaw_deg", "cam_roll_deg",
+        "lane_id", "road_id",
+    ]
+
+    # 每幀 × 每個採樣點一列
+    _PROFILE_HEADER = [
+        "frame_id", "d_req_m", "x", "y", "z", "wp_pitch_deg", "lane_id", "road_id",
+    ]
+
+    def __init__(self, root: pathlib.Path, map_name: str, metadata: dict) -> None:
         ts_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.save_dir = root / "outputs" / f"carla_dataset_{map_name}_{ts_str}"
         self.img_dir  = self.save_dir / "images"
@@ -268,6 +350,17 @@ class DatasetWriter:
         self._csv_f  = open(csv_path, "w", newline="", encoding="utf-8")
         self._writer = csv.writer(self._csv_f)
         self._writer.writerow(self._CSV_HEADER)
+
+        prof_path = self.save_dir / "road_profile.csv"
+        self._prof_f = open(prof_path, "w", newline="", encoding="utf-8")
+        self._prof_writer = csv.writer(self._prof_f)
+        self._prof_writer.writerow(self._PROFILE_HEADER)
+
+        # 掛載參數寫進資料集本身：現在推論 config 的 camera_forward_offset /
+        # camera_height 是手抄過去的，兩邊沒有任何連結，改一邊另一邊不會知道
+        with open(self.save_dir / "metadata.json", "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2, ensure_ascii=False)
+
         self._count = 0
         print(f"[資料集] 儲存至：{self.save_dir}")
 
@@ -281,22 +374,50 @@ class DatasetWriter:
         transform:      carla.Transform,
         speed_mps:      float,
         collect_dist_m: float,
+        cam_tf:         carla.Transform,
+        profile:        list,
     ) -> None:
+        """存一幀。`profile` 來自 `sample_road_profile`，其第 0 點就是相機
+        所在處的 waypoint，所以不必再查一次地圖。"""
         img_path = str(self.img_dir / f"{self._count:06d}.png")
         image.save_to_disk(img_path)
 
+        wp_cam = profile[0][1] if profile else None
+        vl, cl, cr = transform.location, cam_tf.location, cam_tf.rotation
+
+        # pitch 一律 wrap 到 (-180, 180]：CARLA 的平路 waypoint pitch 實測會
+        # 回 360.0，不 wrap 的話下游會讀到「路面 pitch +360 度」
         row = [
             self._count,
-            f"{transform.rotation.pitch:.4f}",
+            f"{_wrap_deg(transform.rotation.pitch):.4f}",
             f"{speed_mps:.4f}",
             f"{collect_dist_m:.4f}",
+            "" if wp_cam is None else f"{_wrap_deg(wp_cam.transform.rotation.pitch):.4f}",
+            f"{_wrap_deg(transform.rotation.roll):.4f}",
+            f"{vl.x:.4f}", f"{vl.y:.4f}", f"{vl.z:.4f}",
+            f"{cl.x:.4f}", f"{cl.y:.4f}", f"{cl.z:.4f}",
+            f"{_wrap_deg(cr.pitch):.4f}", f"{_wrap_deg(cr.yaw):.4f}", f"{_wrap_deg(cr.roll):.4f}",
+            "" if wp_cam is None else int(wp_cam.lane_id),
+            "" if wp_cam is None else int(wp_cam.road_id),
         ]
         self._writer.writerow(row)
         self._csv_f.flush()
+
+        for d_req, wp in profile:
+            loc = wp.transform.location
+            self._prof_writer.writerow([
+                self._count, f"{d_req:.2f}",
+                f"{loc.x:.4f}", f"{loc.y:.4f}", f"{loc.z:.4f}",
+                f"{_wrap_deg(wp.transform.rotation.pitch):.4f}",
+                int(wp.lane_id), int(wp.road_id),
+            ])
+        self._prof_f.flush()
+
         self._count += 1
 
     def close(self) -> None:
         self._csv_f.close()
+        self._prof_f.close()
         print(f"[資料集] 共儲存 {self._count} 幀。路徑：{self.save_dir}")
 
 
@@ -386,7 +507,33 @@ def main() -> None:
     prev_location: Optional[carla.Location] = None
 
     map_name = carla_map.name.split("/")[-1]
-    writer   = DatasetWriter(root_dir, map_name)
+    metadata = {
+        "created":    datetime.datetime.now().isoformat(timespec="seconds"),
+        "map":        carla_map.name,
+        "vehicle_bp": vehicle_bp.id,
+        # 推論端的 camera_forward_offset / camera_height / f_x / f_y 都從這裡推
+        "camera": {
+            "x_forward_m": CAMERA_FWD_X,
+            "z_height_m":  CAMERA_HEIGHT,
+            "fov_deg":     CAMERA_FOV,
+            "img_width":   IMG_WIDTH,
+            "img_height":  IMG_HEIGHT,
+        },
+        "road_profile": {
+            "max_d_m":     _PROFILE_MAX_D_M,
+            "step_m":      _PROFILE_STEP_M,
+            "origin":      "camera",   # waypoint 起點是相機所在處，不是車輛原點
+            "stored":      "world xyz of each waypoint (raw); pitch is a convenience column",
+        },
+        "collection": {
+            "target_speed_kmh": args.speed,
+            "camera_fps":       args.camera_fps,
+            "lookahead_m":      args.lookahead_m,
+            "pid":              {"kp": args.kp, "ki": args.ki, "kd": args.kd},
+            "ff_gain":          args.ff_gain,
+        },
+    }
+    writer   = DatasetWriter(root_dir, map_name, metadata)
     win_name = "CARLA Dataset Collection"
     cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
     print(f"[{state}] TM 對齊車道中（需連續 {args.align_frames} 幀 steer < 0.05）")
@@ -414,15 +561,12 @@ def main() -> None:
 
             transform    = vehicle.get_transform()
             vel          = vehicle.get_velocity()
-            speed_mps    = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
+            speed_mps    = vel.length()
             cur_location = transform.location
 
             # ── 距離累加（每幀位移，同步模式下精度高）────────────────
             if prev_location is not None:
-                dx = cur_location.x - prev_location.x
-                dy = cur_location.y - prev_location.y
-                dz = cur_location.z - prev_location.z
-                frame_dist = math.sqrt(dx**2 + dy**2 + dz**2)
+                frame_dist = cur_location.distance(prev_location)
                 total_distance_m += frame_dist
                 if state == State.COLLECTING:
                     collect_distance_m += frame_dist
@@ -456,7 +600,10 @@ def main() -> None:
             elif state == State.COLLECTING:
                 speed_mps, slope_deg = apply_pid_ff_control_with_steering(
                     vehicle, carla_map, TARGET_SPEED_MPS, pid, ff_gain, args.lookahead_m)
-                writer.save(image, transform, speed_mps, collect_distance_m)
+                cam_tf  = camera.get_transform()
+                profile = sample_road_profile(carla_map, cam_tf.location)
+                writer.save(image, transform, speed_mps, collect_distance_m,
+                            cam_tf, profile)
 
             # ── 顯示視窗 ──────────────────────────────────────────────────────
             arr     = np.frombuffer(image.raw_data, dtype=np.uint8)

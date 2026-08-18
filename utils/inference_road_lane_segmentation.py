@@ -12,7 +12,8 @@ from libs.visualization.lane_visualization import draw_lane_lines, create_overla
 from libs.inference.lane_fitting import inner_chain_points, refine_inner_points, lane_curve
 from libs.visualization.lane_visualization import draw_lane_curves
 from libs.inference.pitch_estimation import estimate_pitch_from_curves
-from libs.visualization.pitch_visualization import plot_pitch_profile, gt_pitch_profile, plot_y3d_profile, save_pitch_estimation_steps
+from libs.visualization.pitch_visualization import plot_pitch_profile, plot_y3d_profile, save_pitch_estimation_steps
+from libs.road_profile_gt import load_profile_gt
 
 with open("config/inference_road_lane_segmentation.yaml", "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
@@ -40,18 +41,18 @@ pitch_method     = config["pitch_estimation"].get("method", "windowed")
 measurements_csv = config["csv_io"]["measurements_csv"]
 
 
-def compute_pitch_mae(pitch_curve, frame_id, measurements):
-    """Compute MAE between predicted continuous pitch(z) and distance-aligned GT."""
+def compute_pitch_mae(pitch_curve, frame_id, gt):
+    """Compute MAE between predicted continuous pitch(z) and the GT profile."""
     import numpy as np
     if pitch_curve["pitch_at"] is None or len(pitch_curve["z_samples"]) == 0:
         return None
     zs = pitch_curve["z_samples"]
     ps = pitch_curve["pitch_samples"]
-    gt = gt_pitch_profile(measurements, frame_id, zs, camera_offset_m)
-    valid = ~np.isnan(gt)
+    gt_deg = gt.pitch_at(frame_id, zs)
+    valid = ~np.isnan(gt_deg)
     if not valid.any():
         return None
-    return float(np.abs(ps[valid] - gt[valid]).mean())
+    return float(np.abs(ps[valid] - gt_deg[valid]).mean())
 
 
 def main():
@@ -114,23 +115,25 @@ def main():
     print(f"lane fitting:        {(t4-t3)*1000:.1f} ms")
     print(f"pitch estimation:    {(t5-t4)*1000:.1f} ms")
 
-    measurements, frame_id = None, None
+    gt, frame_id = None, None
     if Path(measurements_csv).exists():
         frame_id = int(Path(image_path).stem)
-        measurements = pd.read_csv(measurements_csv)
+        gt = load_profile_gt(measurements_csv, camera_offset_m=camera_offset_m,
+                             camera_height=camera_height)
+        print(f"GT source: {gt.describe()}")
 
-        mae = compute_pitch_mae(pitch_curve, frame_id, measurements)
+        mae = compute_pitch_mae(pitch_curve, frame_id, gt)
         if mae is not None:
             print(f"pitch MAE: {mae:.4f}°")
 
         pitch_plot_path = save_path.replace(".png", "_pitch_profile.png")
-        plot_pitch_profile(frame_id, pitch_curve, measurements,
+        plot_pitch_profile(frame_id, pitch_curve, gt,
                            save_path=pitch_plot_path,
                            camera_offset_m=camera_offset_m)
         print(f"pitch profile: {pitch_plot_path}")
 
         y3d_plot_path = save_path.replace(".png", "_y3d_profile.png")
-        plot_y3d_profile(frame_id, widths, pitch_curve, measurements,
+        plot_y3d_profile(frame_id, widths, pitch_curve, gt,
                          f_x, f_y, resized_image.height, w_real, camera_height,
                          save_path=y3d_plot_path,
                          camera_offset_m=camera_offset_m)
@@ -151,7 +154,7 @@ def main():
     steps_dir = save_pitch_estimation_steps(
         resized_image, left_curve, right_curve, pitch_curve,
         f_x, f_y, resized_image.height, w_real, "outputs/pitch_est_step",
-        measurements=measurements, frame_id=frame_id,
+        gt=gt, frame_id=frame_id,
         camera_offset_m=camera_offset_m)
     print(f"pitch estimation steps: {steps_dir}")
 

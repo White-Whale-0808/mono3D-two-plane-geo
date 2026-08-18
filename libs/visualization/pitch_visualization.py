@@ -85,7 +85,7 @@ def gt_height_profile(measurements, frame_id, distances, camera_height,
     return np.interp(d_req, grid[:last + 1], y[:last + 1], right=np.nan)
 
 
-def plot_y3d_profile(frame_id, widths, pitch_curve, measurements,
+def plot_y3d_profile(frame_id, widths, pitch_curve, gt,
                      f_x, f_y, image_height, w_real, camera_height,
                      max_dist=None, save_path=None, debug=False,
                      camera_offset_m=0.0):
@@ -112,8 +112,10 @@ def plot_y3d_profile(frame_id, widths, pitch_curve, measurements,
     pitch_curve : dict
         Output of estimate_pitch_from_widths — uses ``z_points``, ``y_points``,
         ``z_samples``, ``y_samples``.
-    measurements : pd.DataFrame or None
-        Loaded measurements.csv; pass None to skip the GT curve.
+    gt : GT provider or None
+        libs.road_profile_gt.load_profile_gt(...); pass None to skip the GT
+        curve. Measured profiles need no camera_offset_m — the offset is only
+        used by the legacy rebuilt GT.
     camera_height : float or None
         GT anchor height; the GT curve is skipped when None.
     camera_offset_m : float
@@ -163,12 +165,12 @@ def plot_y3d_profile(frame_id, widths, pitch_curve, measurements,
         ax.scatter(z_pts, y_pts, s=10, color="black", alpha=0.45,
                    label="predict height", zorder=5)
 
-    if measurements is not None and camera_height is not None:
+    if gt is not None and camera_height is not None:
         d_grid = np.linspace(0, max_dist, 400)
-        gt_y = gt_height_profile(measurements, frame_id, d_grid, camera_height,
-                                 camera_offset_m=camera_offset_m)
+        gt_y = gt.height_at(frame_id, d_grid)
         ax.plot(d_grid, gt_y, color="tab:green", lw=2,
-                label="GT height (integrated)", zorder=4)
+                label=f"GT height ({gt.describe().split('(')[0].strip()})",
+                zorder=4)
         ax.axhline(-camera_height, color="0.8", lw=1, ls="--",
                    label=f"-camera_height ({-camera_height:.2f} m)", zorder=1)
 
@@ -188,12 +190,12 @@ def plot_y3d_profile(frame_id, widths, pitch_curve, measurements,
 
 def save_pitch_estimation_steps(resized_image, left_curve, right_curve,
                                 pitch_curve, f_x, f_y, image_height, w_real,
-                                out_dir, measurements=None, frame_id=None,
+                                out_dir, gt=None, frame_id=None,
                                 camera_offset_m=0.0):
     """Step-by-step pitch_estimation visualization into out_dir:
     00 width samples on the image, 01 back-projected height profile with the
     local-window fit (three example windows shaded), 02 pitch(z) curve
-    (with distance-aligned GT when measurements are given). Returns out_dir."""
+    (with the GT profile when a GT provider is given). Returns out_dir."""
     import cv2
     import matplotlib
     matplotlib.use("Agg")
@@ -272,10 +274,10 @@ def save_pitch_estimation_steps(resized_image, left_curve, right_curve,
     if len(z_samps):
         ax.plot(z_samps, pitch_curve["pitch_samples"], color="tab:orange",
                 lw=2, label="pitch(z) = arctan(local slope)")
-        if measurements is not None and frame_id is not None:
+        if gt is not None and frame_id is not None:
             grid = np.linspace(0, pitch_curve["z_visible_max"] * 1.3, 300)
-            gt = gt_pitch_profile(measurements, frame_id, grid, camera_offset_m)
-            ax.plot(grid, gt, color="tab:blue", lw=2, label="GT (distance-aligned)")
+            ax.plot(grid, gt.pitch_at(frame_id, grid), color="tab:blue", lw=2,
+                    label="GT")
     ax.set_xlabel("z (m)")
     ax.set_ylabel("pitch (deg)")
     ax.set_title("continuous pitch(z), one local Theil-Sen slope per sample")
@@ -286,7 +288,7 @@ def save_pitch_estimation_steps(resized_image, left_curve, right_curve,
     return str(out)
 
 
-def plot_pitch_profile(frame_id, pitch_curve, measurements,
+def plot_pitch_profile(frame_id, pitch_curve, gt,
                        max_dist=None, save_path=None, camera_offset_m=0.0):
     """Plot continuous predicted pitch(z) vs GT.
 
@@ -296,8 +298,8 @@ def plot_pitch_profile(frame_id, pitch_curve, measurements,
     pitch_curve : dict
         Output of estimate_pitch_from_widths — must contain keys
         ``z_samples``, ``pitch_samples``, ``z_visible_min``, ``z_visible_max``.
-    measurements : pd.DataFrame
-        Loaded from measurements.csv.
+    gt : GT provider
+        libs.road_profile_gt.load_profile_gt(...).
     max_dist : float, optional
         x-axis limit. Defaults to 1.5× the visible range.
     save_path : str, optional
@@ -327,13 +329,13 @@ def plot_pitch_profile(frame_id, pitch_curve, measurements,
         max_dist = max(z_hi * 1.5, 15)
 
     d_grid = np.linspace(0, max_dist, 200)
-    gt     = gt_pitch_profile(measurements, frame_id, d_grid, camera_offset_m)
+    gt_deg = gt.pitch_at(frame_id, d_grid)
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.plot(d_grid, gt, color="tab:blue", lw=2, label="GT (distance-aligned)")
+    ax.plot(d_grid, gt_deg, color="tab:blue", lw=2, label="GT")
     if has_pred:
         ax.plot(z_samps, pitch_samps, color="tab:orange", lw=2,
-                label="Predicted (continuous spline)")
+                label="Predicted pitch(z)")
 
     ax.set_xlabel("distance ahead (m)")
     ax.set_ylabel("road pitch relative to ego plane (deg)")
