@@ -150,7 +150,7 @@ def _compute_pid_ff(
 ) -> tuple[float, float, float, float]:
     """算 PID + Feed-forward 縱向控制量，不呼叫 apply_control。回傳 (throttle, brake, 當前速度 m/s, 坡度 °)。"""
     vel       = vehicle.get_velocity()
-    speed     = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
+    speed     = vel.length()
     error     = target_mps - speed
     slope_deg = _get_slope_deg(vehicle)
 
@@ -209,10 +209,6 @@ def _pure_pursuit_steer(vehicle: carla.Vehicle, carla_map: carla.Map,
 _PROFILE_MAX_D_M = 50.0   # 採樣到相機前方幾公尺（略大於 pitch_estimation 的 z_cap 45）
 _PROFILE_STEP_M  = 1.0    # 採樣間距
 
-def _fwd_dot(a: carla.Vector3D, b: carla.Vector3D) -> float:
-    return a.x * b.x + a.y * b.y + a.z * b.z
-
-
 def sample_road_profile(
     carla_map:  carla.Map,
     cam_loc:    carla.Location,
@@ -244,7 +240,7 @@ def sample_road_profile(
         nxts = wp.next(step_m)
         if not nxts:
             break   # 路盡頭：剖面就到此為止，不猜測
-        wp = max(nxts, key=lambda w: _fwd_dot(w.transform.get_forward_vector(), prev_fwd))
+        wp = max(nxts, key=lambda w: w.transform.get_forward_vector().dot(prev_fwd))
         prev_fwd = wp.transform.get_forward_vector()
         d += step_m
         out.append((d, wp))
@@ -565,15 +561,12 @@ def main() -> None:
 
             transform    = vehicle.get_transform()
             vel          = vehicle.get_velocity()
-            speed_mps    = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
+            speed_mps    = vel.length()
             cur_location = transform.location
 
             # ── 距離累加（每幀位移，同步模式下精度高）────────────────
             if prev_location is not None:
-                dx = cur_location.x - prev_location.x
-                dy = cur_location.y - prev_location.y
-                dz = cur_location.z - prev_location.z
-                frame_dist = math.sqrt(dx**2 + dy**2 + dz**2)
+                frame_dist = cur_location.distance(prev_location)
                 total_distance_m += frame_dist
                 if state == State.COLLECTING:
                     collect_distance_m += frame_dist
