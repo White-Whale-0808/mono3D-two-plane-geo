@@ -51,12 +51,25 @@ pitch_estimation:
   # w_real is a pure scale factor: z -> (1+d)z and Y -> (1+d)Y, so dY/dz and every
   # pitch VALUE are unchanged; only the z-axis labelling shifts. The MAE change is
   # therefore pure z-axis misalignment against GT, and 3.216 is currently absorbing
-  # a GT-side systematic (prime suspect: collect_dist_m is 3D arc length while the
-  # pipeline's z is depth - 2.2% apart on a 12 deg slope). See to-do.md.
+  # a GT-side systematic.
   #
-  # DO NOT change this to 3.25 until the GT distance axis is fixed (to-do groups
-  # 2 and 3). Doing it alone breaks the error cancellation, exactly like the
-  # w_real / camera-offset pair in WWH-11.
+  # The arc-length suspect (collect_dist_m is 3D arc length, the pipeline's z is
+  # depth) was REFUTED offline on 2026-08-18. The conversion factor is not
+  # cos(theta) but cos(theta_ahead - theta_at_camera): the camera is rigid on the
+  # vehicle, so it tilts WITH the road and a constant grade needs no correction at
+  # all. Measured effect 0.03-0.99%, and applying it makes MAE WORSE
+  # (0.2331 -> 0.2383) because it moves GT the wrong way. See to-do.md.
+  #
+  # The confirmed GT-side source is that gt_pitch_deg records BODY attitude
+  # (suspension included), not the road: measured body = 1.0213 x road - 0.48 deg
+  # over 400 frames, i.e. a 2.1% amplitude excess covering ~2/3 of the residual.
+  # Fixing it is to-do group 2/3 (road_pitch_deg / direct forward profile).
+  #
+  # DO NOT change this to 3.25 until that GT is collected (to-do groups 2 and 3).
+  # Doing it alone breaks the error cancellation, exactly like the w_real /
+  # camera-offset pair in WWH-11. Note the best-fitting w_real on the CURRENT GT
+  # is ~3.10, and ~3.15 once the body/road ratio is taken out - neither reaches
+  # 3.25, so a residual ~1% scale error is still unaccounted for.
   w_real: 3.216
   camera_height: 1.08  # Camera mount height above road (m): CAMERA_HEIGHT in carla_module/get_carlaDataset.py (the dataset collector). NOTE realtime_test.py mounts its camera at 2.4 m and overrides this. Used to derive lane_segmentation thresholds from projection geometry.
   camera_forward_offset: 1.5  # Camera mount offset AHEAD of the vehicle origin (m): the x of carla.Transform(carla.Location(x=1.5, z=CAMERA_HEIGHT)) in get_carlaDataset.py. measurements.csv records collect_dist_m / gt_pitch_deg at the VEHICLE origin, so GT lookups for a point at camera depth z must use vehicle distance z + this offset.
