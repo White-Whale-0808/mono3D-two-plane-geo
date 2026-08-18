@@ -5,8 +5,8 @@ model:
   # weight_path: "models/road_segmentation_best.pth"  # The original Resnet101 model is too slow and not accurate enough, so we switched to PIDNet_L 
 
 input:
-  image_path: "inference_datasets/carla_dataset_Town03_uphile/images/000300.png"
-  image_batch_path: "inference_datasets/carla_dataset_Town03_uphile/images"
+  image_path: "inference_datasets/carla_dataset_Town03_20260818_195221/images/000000.png"
+  image_batch_path: "inference_datasets/carla_dataset_Town03_20260818_195221/images"
   resize_size:
     - 512
     - 1024
@@ -35,6 +35,26 @@ pitch_estimation:
   # Inner-edge-to-inner-edge lane width (m). NOT carla's waypoint.lane_width (3.5),
   # which is boundary-CENTRE to boundary-CENTRE (verified 2026-07-31: the projected
   # 1.75 m line lands on the centre of the painted marking to within 9 mm, n=399).
+  #
+  # !! 3.25 IS SPECIFIC TO THIS ROAD'S MARKING LAYOUT !!
+  # This dataset's lane has DOUBLE YELLOW on the left and a SINGLE WHITE line on
+  # the right. Since w_real is inner-edge-to-inner-edge, each side is inset from
+  # the 3.5 m boundary-centre width by a different amount:
+  #
+  #     left  (SolidSolid, double yellow): inset = width + gap/2 = 0.125 + 0.0625 = 0.1875
+  #     right (Solid,      single white):  inset = width/2       =                  0.0625
+  #                                        total inset 0.25  ->  w_real = 3.25
+  #
+  # The two sides are ASYMMETRIC (1.5625 vs 1.6875 from the lane centre), which is
+  # harmless: w_px is a pixel DIFFERENCE and Y_3d only reads image rows, so only the
+  # SPACING enters the model, never the absolute positions.
+  #
+  # Change the marking layout and this number changes. On the same 3.5 m lane:
+  #     single + single   ->  3.5 - 0.125  = 3.375
+  #     double + single   ->  3.5 - 0.25   = 3.25    (this dataset)
+  #     double + double   ->  3.5 - 0.375  = 3.125
+  # A different lane_width shifts it again. Re-derive per road; do NOT carry 3.25
+  # over to another map, another lane, or a lane with different markings.
   #
   # 3.25 is the PHYSICAL value and is now backed by four independent measurements
   # against a directly-measured road profile (dataset carla_dataset_Town03_20260818_195221,
@@ -73,8 +93,8 @@ visualization:
   save_path: "outputs/result.png"
 
 csv_io:
-  input_dir: "inference_datasets/carla_dataset_Town03_uphile/measurements.csv"
+  input_dir: "inference_datasets/carla_dataset_Town03_20260818_195221/measurements.csv"
   output_dir: "outputs/measurements.csv"
-  measurements_csv: "inference_datasets/carla_dataset_Town03_uphile/measurements.csv"
+  measurements_csv: "inference_datasets/carla_dataset_Town03_20260818_195221/measurements.csv"
   problem_csv: "outputs/problem.csv"  # Frames with profile_mae above problem_mae_threshold, sorted worst-first
   problem_mae_threshold: 2.0  # Degrees; frames above this are flagged in problem_csv

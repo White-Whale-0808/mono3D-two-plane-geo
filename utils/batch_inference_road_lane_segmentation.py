@@ -10,7 +10,7 @@ from libs.inference.line_segmentation import detect_lines_with_elsed
 from libs.inference.lane_segmentation import split_left_right_lines
 from libs.inference.lane_fitting import inner_chain_points, refine_inner_points, lane_curve
 from libs.inference.pitch_estimation import estimate_pitch_from_curves
-from libs.visualization.pitch_visualization import gt_pitch_profile
+from libs.road_profile_gt import load_profile_gt
 from libs.visualization.profile_mae_visualization import plot_profile_mae
 import traceback
 
@@ -44,22 +44,24 @@ problem_mae_threshold     = config["csv_io"]["problem_mae_threshold"]
 IMG_FMT = "{:06d}.png"
 
 
-def _compute_mae(pitch_curve, frame_id, measurements):
+def _compute_mae(pitch_curve, frame_id, gt):
     """Return profile MAE (float) or None if degenerate or no valid GT samples."""
     if pitch_curve["pitch_at"] is None or len(pitch_curve["z_samples"]) == 0:
         return None
     zs = pitch_curve["z_samples"]
     ps = pitch_curve["pitch_samples"]
-    gt = gt_pitch_profile(measurements, frame_id, zs, camera_offset_m)
-    valid = ~np.isnan(gt)
+    gt_deg = gt.pitch_at(frame_id, zs)
+    valid = ~np.isnan(gt_deg)
     if not valid.any():
         return None
-    return round(float(np.abs(ps[valid] - gt[valid]).mean()), 4)
+    return round(float(np.abs(ps[valid] - gt_deg[valid]).mean()), 4)
 
 
 def main():
     df = pd.read_csv(input_csv)
-    measurements = pd.read_csv(measurements_csv)
+    gt = load_profile_gt(measurements_csv, camera_offset_m=camera_offset_m,
+                         camera_height=camera_height)
+    print(f"GT source: {gt.describe()}")
     model = load_pidnet(model_name, weight_path, device)
 
     n_total         = len(df)
@@ -112,7 +114,7 @@ def main():
             if pitch_curve["pitch_at"] is not None:
                 z_vis_min_col[i] = round(float(pitch_curve["z_visible_min"]), 2)
                 z_vis_max_col[i] = round(float(pitch_curve["z_visible_max"]), 2)
-                mae = _compute_mae(pitch_curve, frame_id, measurements)
+                mae = _compute_mae(pitch_curve, frame_id, gt)
                 if mae is not None:
                     profile_mae_col[i] = mae
 
