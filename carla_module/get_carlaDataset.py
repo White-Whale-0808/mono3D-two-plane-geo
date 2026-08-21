@@ -27,7 +27,8 @@ CARLA 資料集蒐集腳本：蒐集 RGB 影像與 GT pitch／速度／行駛距
 儲存路徑：outputs/carla_dataset_{Map}_{YYYYMMDD_HHMMSS}/
     ├── images/         000000.png, 000001.png, ...
     ├── measurements.csv  逐幀：車身姿態 / 路面姿態 / 速度 / 距離 / 車輛與相機世界座標
-    ├── road_profile.csv  逐幀 × 逐採樣點：相機前方路面的世界座標（採集當下直接問地圖）
+    ├── road_profile.csv  逐幀 × 逐採樣點：相機前方路面的世界座標（採集當下直接問地圖），
+    │                     解析中心線高度 `z` 與向下射線量到的網格高度 `z_mesh` 兩欄並存
     └── metadata.json     相機掛載參數、fov、解析度、地圖名、採集設定
 
 GT 的設計原則：**存最生的量，之後再推導**。前方剖面存 waypoint 的世界座標而
@@ -58,6 +59,8 @@ import datetime
 import json
 import math
 import queue
+import time
+from collections import deque
 from typing import Optional
 
 import carla
@@ -207,15 +210,81 @@ def _pure_pursuit_steer(vehicle: carla.Vehicle, carla_map: carla.Map,
 # ── 前方路面剖面（採集當下直接問地圖）──────────────────────────────────────────
 
 _PROFILE_MAX_D_M = 50.0   # 採樣到相機前方幾公尺（略大於 pitch_estimation 的 z_cap 45）
-_PROFILE_STEP_M  = 1.0    # 採樣間距
+
+# 採樣間距。0.125 m 是對齊 legacy GT 的密度 —— 那條是逐幀取樣的，18 km/h @ 40 fps
+# 下相機每幀前進 0.1246 m。
+#
+# 原本是 1.0 m，實測太稀：GT 的 pitch 由 np.gradient 逐點微分求得，1 m 間距等於
+# 把剖面當折線，畫出來也是折線。試過離線補救（把所有幀的剖面點在世界座標下合併，
+# 可到 1 cm 間距）但更差 —— 單幀那批點是同一瞬間、同一個相機姿態打出來的，內部
+# 一致；跨幀合併會混入各幀 transform 的配準誤差。密度要在採集時給。
+#
+# 代價：每幀的 next() 與 cast_ray 都從 51 次變 401 次。同步模式下這只花牆鐘時間，
+# 不影響物理與車速（見 --no-profile-ray 的說明），但整趟採集會明顯變久。
+_PROFILE_STEP_M  = 0.125
+
+# 射線模式：從解析曲面**上方** _UP_M 處起打，一路搜到曲面**下方** _DEPTH_M
+# （射線總長 = 兩者相加），找渲染網格的實際高度。
+# 起點必須抬高 —— waypoint 的 z 就在解析曲面上，從那裡起算會落在網格的正負
+# 兩側，往下打有可能整條射線都在網格下方而漏掉。抬 2 m 遠比任何可能的網格
+# 偏差大（相機腳下實測僅 mm 級），又低到不會打到天橋/隧道頂。
+_PROFILE_RAY_UP_M    = 2.0
+_PROFILE_RAY_DEPTH_M = 6.0
+
+# 向下射線可接受的地面語意標籤（label 名稱字串比對，跨 CARLA 版本較穩）。
+# verify_carla_geometry.py 也用這份，改這裡兩邊一起動。
+GROUND_LABELS = {"Roads", "RoadLines", "Ground", "Terrain", "Sidewalks"}
+
+
+def ray_ground_z(world: carla.World, loc: carla.Location,
+                 depth: float = _PROFILE_RAY_DEPTH_M) -> tuple[Optional[float], Optional[str]]:
+    """
+    從 loc 垂直向下射線，回傳第一個「地面語意」命中點的 z 與其標籤。
+
+    **必須**用 label 過濾：從相機處起算的射線會先穿過引擎蓋/底盤，剖面上的
+    射線則可能打到路上的車輛或雜物。找不到地面標籤就回 None —— 不做退而求
+    其次的猜測，寧缺勿錯（否則會把車身高度當成路面高度）。
+
+    回傳的第二項在失敗時是 `"no-ground:<看到的標籤>"`，方便離線分辨「射線沒
+    命中」與「命中了但都不是地面」。
+    """
+    try:
+        end    = carla.Location(x=loc.x, y=loc.y, z=loc.z - depth)
+        points = world.cast_ray(loc, end)
+    except Exception:                                          # noqa: BLE001
+        return None, None
+    if not points:
+        return None, None
+
+    labels_seen: list[str] = []
+    for pt in points:
+        label = str(getattr(pt, "label", "")).split(".")[-1]
+        z     = float(pt.location.z)
+        if z > loc.z + 1e-6:          # 射線可能回傳起點上方的命中，忽略
+            continue
+        labels_seen.append(label)
+        if label in GROUND_LABELS:
+            return z, label
+    return None, ("no-ground:" + ",".join(labels_seen) if labels_seen else None)
+
 
 def sample_road_profile(
     carla_map:  carla.Map,
     cam_loc:    carla.Location,
     max_d_m:    float = _PROFILE_MAX_D_M,
     step_m:     float = _PROFILE_STEP_M,
-) -> list[tuple[float, carla.Waypoint]]:
-    """相機前方路面剖面：沿車道往前走，回傳 (要求距離, waypoint) 序列。
+    world:      Optional[carla.World] = None,
+) -> list[tuple[float, carla.Waypoint, Optional[float], Optional[str]]]:
+    """相機前方路面剖面：沿車道往前走，回傳
+    (要求距離, waypoint, 網格高度, 網格標籤) 序列。
+
+    給 `world` 就多打一輪向下射線，量**渲染網格**的高度；不給則後兩項為 None。
+    兩種高度都存、不是二選一：waypoint 給的是 OpenDRIVE 的**解析中心線**，
+    但相機看到的、車子壓過的都是由那條曲線三角化出來的**網格**。兩者在相機
+    腳下實測只差 mm 級（`verify_carla_geometry` 那趟，median −0.28 mm、
+    std 3.59 mm），但那是**在腳下量的** —— 相機真正看的是前方 5-40 m，遠處的
+    三角化密度與 LOD 從來沒有量過，而 pitch 對深度方向的高度變化極敏感。
+    兩欄並存才能離線比較，也不會弄壞既有的解析式 GT。
 
     取代「用行駛歷史回推前方 GT」的做法（`pitch_visualization.gt_pitch_profile`
     是拿車子後來開到那裡時的 pitch 當前方 GT）。歷史回推有三個問題：車身/懸吊
@@ -233,7 +302,7 @@ def sample_road_profile(
     if wp is None:
         return []
 
-    out = [(0.0, wp)]
+    walked = [(0.0, wp)]
     prev_fwd = wp.transform.get_forward_vector()
     d = 0.0
     while d < max_d_m - 1e-6:
@@ -243,7 +312,18 @@ def sample_road_profile(
         wp = max(nxts, key=lambda w: w.transform.get_forward_vector().dot(prev_fwd))
         prev_fwd = wp.transform.get_forward_vector()
         d += step_m
-        out.append((d, wp))
+        walked.append((d, wp))
+
+    if world is None:
+        return [(d_req, w, None, None) for d_req, w in walked]
+
+    out = []
+    for d_req, w in walked:
+        loc   = w.transform.location
+        start = carla.Location(x=loc.x, y=loc.y, z=loc.z + _PROFILE_RAY_UP_M)
+        z_mesh, label = ray_ground_z(
+            world, start, depth=_PROFILE_RAY_UP_M + _PROFILE_RAY_DEPTH_M)
+        out.append((d_req, w, z_mesh, label))
     return out
 
 
@@ -290,6 +370,13 @@ def parse_args() -> argparse.Namespace:
                    help="連續幾幀 steer<0.05 才視為對齊完成（預設：20）")
     p.add_argument("--warmup-frames", type=int,   default=10,
                    help="切換 TM→手動後再等幾幀才開始存檔（預設：10）")
+    p.add_argument("--profile-step-m", type=float, default=_PROFILE_STEP_M,
+                   help=f"前方剖面的採樣間距（公尺，預設 {_PROFILE_STEP_M}，"
+                        f"對齊 legacy GT 的逐幀密度）。調大可換取採集速度")
+    p.add_argument("--no-profile-ray", action="store_true",
+                   help="關閉剖面向下射線（只存 waypoint 解析高度）。"
+                        "每幀多一輪 cast_ray（點數 = max_d/step + 1）：同步模式下"
+                        "這只拉長採集的牆鐘時間，不影響物理與車速，趕時間才需要關")
     p.add_argument("--lookahead-m",   type=float, default=6.0,
                    help="pure-pursuit 橫向修正的前視距離（預設 6 m），"
                         "取代寫死 steer=0 的假設")
@@ -336,8 +423,12 @@ class DatasetWriter:
     ]
 
     # 每幀 × 每個採樣點一列
+    # `z` 是 waypoint 的解析高度（欄名不動，舊 reader 與舊資料集照常）；
+    # `z_mesh` / `mesh_label` 是向下射線量到的渲染網格高度，射線模式關閉或
+    # 沒打到地面語意時留空。
     _PROFILE_HEADER = [
         "frame_id", "d_req_m", "x", "y", "z", "wp_pitch_deg", "lane_id", "road_id",
+        "z_mesh", "mesh_label",
     ]
 
     def __init__(self, root: pathlib.Path, map_name: str, metadata: dict) -> None:
@@ -377,7 +468,8 @@ class DatasetWriter:
         cam_tf:         carla.Transform,
         profile:        list,
     ) -> None:
-        """存一幀。`profile` 來自 `sample_road_profile`，其第 0 點就是相機
+        """存一幀。`profile` 來自 `sample_road_profile`，是
+        (要求距離, waypoint, 網格高度, 網格標籤) 序列；其第 0 點就是相機
         所在處的 waypoint，所以不必再查一次地圖。"""
         img_path = str(self.img_dir / f"{self._count:06d}.png")
         image.save_to_disk(img_path)
@@ -403,13 +495,15 @@ class DatasetWriter:
         self._writer.writerow(row)
         self._csv_f.flush()
 
-        for d_req, wp in profile:
+        for d_req, wp, z_mesh, mesh_label in profile:
             loc = wp.transform.location
             self._prof_writer.writerow([
                 self._count, f"{d_req:.2f}",
                 f"{loc.x:.4f}", f"{loc.y:.4f}", f"{loc.z:.4f}",
                 f"{_wrap_deg(wp.transform.rotation.pitch):.4f}",
                 int(wp.lane_id), int(wp.road_id),
+                "" if z_mesh is None else f"{z_mesh:.4f}",
+                "" if mesh_label is None else mesh_label,
             ])
         self._prof_f.flush()
 
@@ -505,6 +599,13 @@ def main() -> None:
     total_distance_m   = 0.0   # 累計總行駛距離（含 ALIGNING/WARMUP）
     collect_distance_m = 0.0   # 僅 COLLECTING 階段的距離
     prev_location: Optional[carla.Location] = None
+    # 剖面取樣耗時（最近 50 幀）：射線模式每幀多一輪 cast_ray（點數 =
+    # max_d/step + 1，預設 401 次）。這是**牆鐘**
+    # 成本，不是模擬預算 —— 同步模式下每次 world.tick() 推進固定的
+    # fixed_delta_seconds，RPC 再慢也不會改變物理、PID 的 dt 或車速曲線，只會
+    # 讓整趟採集在現實時間裡變久。顯示出來是為了估採集要花多久，不是為了看
+    # 有沒有超時
+    profile_ms = deque(maxlen=50)
 
     map_name = carla_map.name.split("/")[-1]
     metadata = {
@@ -521,9 +622,15 @@ def main() -> None:
         },
         "road_profile": {
             "max_d_m":     _PROFILE_MAX_D_M,
-            "step_m":      _PROFILE_STEP_M,
+            "step_m":      args.profile_step_m,
             "origin":      "camera",   # waypoint 起點是相機所在處，不是車輛原點
             "stored":      "world xyz of each waypoint (raw); pitch is a convenience column",
+            "ray_mode":    not args.no_profile_ray,
+            "ray_up_m":    _PROFILE_RAY_UP_M,
+            "ray_depth_m": _PROFILE_RAY_DEPTH_M,
+            "ray_labels":  sorted(GROUND_LABELS),
+            "z_mesh":      "downward-ray hit on the rendered mesh; blank when "
+                           "ray mode is off or no ground-semantic hit",
         },
         "collection": {
             "target_speed_kmh": args.speed,
@@ -600,8 +707,12 @@ def main() -> None:
             elif state == State.COLLECTING:
                 speed_mps, slope_deg = apply_pid_ff_control_with_steering(
                     vehicle, carla_map, TARGET_SPEED_MPS, pid, ff_gain, args.lookahead_m)
-                cam_tf  = camera.get_transform()
-                profile = sample_road_profile(carla_map, cam_tf.location)
+                cam_tf   = camera.get_transform()
+                _t0      = time.perf_counter()
+                profile  = sample_road_profile(
+                    carla_map, cam_tf.location, step_m=args.profile_step_m,
+                    world=None if args.no_profile_ray else world)
+                profile_ms.append((time.perf_counter() - _t0) * 1e3)
                 writer.save(image, transform, speed_mps, collect_distance_m,
                             cam_tf, profile)
 
@@ -631,6 +742,11 @@ def main() -> None:
                         f"Dist(total): {total_distance_m:.1f} m  "
                         f"Dist(collect): {collect_distance_m:.1f} m",
                         (10, 126),    font, 0.8, (180, 255, 180), 2, cv2.LINE_AA)
+            if profile_ms:
+                cv2.putText(display,
+                            f"Profile: {sum(profile_ms) / len(profile_ms):.1f} ms/frame "
+                            f"wall-clock  (ray {'off' if args.no_profile_ray else 'on'})",
+                            (10, 158),    font, 0.8, (200, 200, 255), 2, cv2.LINE_AA)
             cv2.putText(display,
                         "Press Q to stop",
                         (10, h - 12), font, 0.7, (200, 200, 200), 2, cv2.LINE_AA)

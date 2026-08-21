@@ -77,18 +77,17 @@ from carla_module.get_carlaDataset import (
     CAMERA_FOV,
     CAMERA_FWD_X,
     CAMERA_HEIGHT,
+    GROUND_LABELS,
     IMG_HEIGHT,
     IMG_WIDTH,
     PHYSICS_WARMUP_TICKS,
     PIDController,
     _wrap_deg,
     apply_pid_ff_control_with_steering,
+    ray_ground_z,
 )
 
 _PROJECT_ROOT = pathlib.Path(__file__).parent.parent
-
-# 向下射線可接受的地面語意標籤（label 名稱字串比對，跨 CARLA 版本較穩）
-_GROUND_LABELS = {"Roads", "RoadLines", "Ground", "Terrain", "Sidewalks"}
 
 # 雙線標記：CARLA 的 LaneMarking.width 對這些型別回報的是**單條線寬**
 # （實測 SolidSolid 與 Solid 同樣回 0.125），不含第二條線也不含中間間隙
@@ -228,35 +227,6 @@ def _local_to_world(vehicle_tf: carla.Transform,
     return res if isinstance(res, carla.Location) else pt
 
 
-def _ray_ground_z(world: carla.World, loc: carla.Location,
-                  depth: float = 6.0) -> tuple[Optional[float], Optional[str]]:
-    """
-    從 loc 垂直向下射線，回傳第一個「地面語意」命中點的 z 與其標籤。
-
-    相機掛在 x=1.5 z=1.08，射線一定會先穿過引擎蓋/底盤，所以**必須**用 label
-    過濾。找不到地面標籤就回 None —— 不做退而求其次的猜測，寧缺勿錯（否則會
-    把車身高度當成路面高度，正是這支腳本要排除的那種錯）。
-    """
-    try:
-        end    = carla.Location(x=loc.x, y=loc.y, z=loc.z - depth)
-        points = world.cast_ray(loc, end)
-    except Exception:                                          # noqa: BLE001
-        return None, None
-    if not points:
-        return None, None
-
-    labels_seen: list[str] = []
-    for pt in points:
-        label = str(getattr(pt, "label", "")).split(".")[-1]
-        z     = float(pt.location.z)
-        if z > loc.z + 1e-6:          # 射線可能回傳起點上方的命中，忽略
-            continue
-        labels_seen.append(label)
-        if label in _GROUND_LABELS:
-            return z, label
-    return None, ("no-ground:" + ",".join(labels_seen) if labels_seen else None)
-
-
 def _projection_ground_z(world: carla.World,
                          loc: carla.Location,
                          depth: float = 6.0) -> Optional[float]:
@@ -271,7 +241,7 @@ def _projection_ground_z(world: carla.World,
     if pt is None:
         return None
     label = str(getattr(pt, "label", "")).split(".")[-1]
-    if label and label not in _GROUND_LABELS:
+    if label and label not in GROUND_LABELS:
         return None
     return float(pt.location.z)
 
@@ -298,7 +268,7 @@ def _measure(world: carla.World,
     wp_cam = carla_map.get_waypoint(cam_loc, project_to_road=True)
     wp_veh = carla_map.get_waypoint(veh_tf.location, project_to_road=True)
 
-    ray_z, ray_label = _ray_ground_z(world, cam_loc)
+    ray_z, ray_label = ray_ground_z(world, cam_loc)
     proj_z           = _projection_ground_z(world, cam_loc)
 
     rec: dict[str, Any] = {

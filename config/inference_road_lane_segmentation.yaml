@@ -5,8 +5,8 @@ model:
   # weight_path: "models/road_segmentation_best.pth"  # The original Resnet101 model is too slow and not accurate enough, so we switched to PIDNet_L 
 
 input:
-  image_path: "inference_datasets/carla_dataset_Town03_20260818_195221/images/000000.png"
-  image_batch_path: "inference_datasets/carla_dataset_Town03_20260818_195221/images"
+  image_path: "inference_datasets/carla_dataset_Town03_20260822_021432/images/000380.png"
+  image_batch_path: "inference_datasets/carla_dataset_Town03_20260822_021432/images"
   resize_size:
     - 512
     - 1024
@@ -88,13 +88,46 @@ pitch_estimation:
   camera_forward_offset: 1.5  # Camera mount offset AHEAD of the vehicle origin (m): the x of carla.Transform(carla.Location(x=1.5, z=CAMERA_HEIGHT)) in get_carlaDataset.py. measurements.csv records collect_dist_m / gt_pitch_deg at the VEHICLE origin, so GT lookups for a point at camera depth z must use vehicle distance z + this offset.
   method: windowed  # Pitch estimator: "windowed" (local z-window Theil-Sen, explicit spatial resolution) or "spline" (global weighted UnivariateSpline)
 
+# GT 不是 pipeline 的一個階段，是評估用的參考值，所以自成一區
+ground_truth:
+  # 量測式 GT 的高度來源（沒有 road_profile.csv 的舊資料集會自動退回回推式，
+  # 這個設定就沒有作用）：
+  #   auto     - 有 z_mesh 就用 mesh，沒有（WWH-14 之前的舊資料集）退回 analytic
+  #   analytic - road_profile.csv 的 z 欄，OpenDRIVE 的解析中心線
+  #   mesh     - z_mesh 欄，採集當下向下射線打到路面網格的高度
+  #
+  # 明確寫 mesh 而資料集沒有那欄會報錯；auto 才會退回。這是為了讓舊資料集照常
+  # 可用，不是讓打錯的設定默默生效。runner 會印 `GT source:` 說明實際選到哪個。
+  #
+  # 預設 mesh。三條獨立證據（2026-08-22 定案，過程中我兩度得出相反結論，
+  # 錯誤原因記在最後）：
+  #
+  # 1. 那個路面偏差是真的幾何，不是 cast_ray 的假象 ——
+  #    legacy GT（車身姿態，動力學）與 mesh GT（射線，幾何）相對 analytic 多出來
+  #    的結構，逐幀去均值後 corr median +0.990，100% 的幀 >0.5。兩條完全獨立的
+  #    量測路徑記錄到同一個東西。
+  # 2. 相機看得到 —— 預測相對 analytic 的偏離 vs 網格偏差，逐幀去均值 corr
+  #    median +0.909、81.2% >0.5；排列對照（別幀的形狀 / 隨機平滑曲線）是
+  #    −0.084 / −0.005，32%。逐幀迴歸斜率 +0.588 → 相機看到約 59% 的振幅。
+  # 3. w_real 判定更接近幾何值 —— 零平均高度殘差：mesh 3.2522、analytic 3.2486，
+  #    幾何值 3.2500。
+  #
+  # 官方批次（446 幀）：analytic mean 0.2688 / p90 0.7063；
+  #                     mesh     mean 0.2367 / p90 0.4647。
+  #
+  # ⚠ 不要用**絕對高度** MAE 判定這件事。GT 是 `P_world − cam_world`，換 z_mesh
+  # 只改剖面點；短視距幀的窗口整個落在偏差區裡，GT 曲線幾乎整條平移，絕對高度
+  # MAE 會爆掉（+132%）但那是平移不是形狀。扣掉每幀常數項後 mesh 反而較好。
+  # 我第一次就是踩這個坑得出「mesh 明顯更差」的錯誤結論。
+  height_source: "auto"
+
 visualization:
   alpha: 0.4
   save_path: "outputs/result.png"
 
 csv_io:
-  input_dir: "inference_datasets/carla_dataset_Town03_20260818_195221/measurements.csv"
+  input_dir: "inference_datasets/carla_dataset_Town03_20260822_021432/measurements.csv"
   output_dir: "outputs/measurements.csv"
-  measurements_csv: "inference_datasets/carla_dataset_Town03_20260818_195221/measurements.csv"
+  measurements_csv: "inference_datasets/carla_dataset_Town03_20260822_021432/measurements.csv"
   problem_csv: "outputs/problem.csv"  # Frames with profile_mae above problem_mae_threshold, sorted worst-first
   problem_mae_threshold: 2.0  # Degrees; frames above this are flagged in problem_csv
