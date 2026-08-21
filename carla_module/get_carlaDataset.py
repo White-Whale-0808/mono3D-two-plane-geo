@@ -210,7 +210,18 @@ def _pure_pursuit_steer(vehicle: carla.Vehicle, carla_map: carla.Map,
 # ── 前方路面剖面（採集當下直接問地圖）──────────────────────────────────────────
 
 _PROFILE_MAX_D_M = 50.0   # 採樣到相機前方幾公尺（略大於 pitch_estimation 的 z_cap 45）
-_PROFILE_STEP_M  = 1.0    # 採樣間距
+
+# 採樣間距。0.125 m 是對齊 legacy GT 的密度 —— 那條是逐幀取樣的，18 km/h @ 40 fps
+# 下相機每幀前進 0.1246 m。
+#
+# 原本是 1.0 m，實測太稀：GT 的 pitch 由 np.gradient 逐點微分求得，1 m 間距等於
+# 把剖面當折線，畫出來也是折線。試過離線補救（把所有幀的剖面點在世界座標下合併，
+# 可到 1 cm 間距）但更差 —— 單幀那批點是同一瞬間、同一個相機姿態打出來的，內部
+# 一致；跨幀合併會混入各幀 transform 的配準誤差。密度要在採集時給。
+#
+# 代價：每幀的 next() 與 cast_ray 都從 51 次變 401 次。同步模式下這只花牆鐘時間，
+# 不影響物理與車速（見 --no-profile-ray 的說明），但整趟採集會明顯變久。
+_PROFILE_STEP_M  = 0.125
 
 # 射線模式：從解析曲面**上方** _UP_M 處起打，一路搜到曲面**下方** _DEPTH_M
 # （射線總長 = 兩者相加），找渲染網格的實際高度。
@@ -359,10 +370,13 @@ def parse_args() -> argparse.Namespace:
                    help="連續幾幀 steer<0.05 才視為對齊完成（預設：20）")
     p.add_argument("--warmup-frames", type=int,   default=10,
                    help="切換 TM→手動後再等幾幀才開始存檔（預設：10）")
+    p.add_argument("--profile-step-m", type=float, default=_PROFILE_STEP_M,
+                   help=f"前方剖面的採樣間距（公尺，預設 {_PROFILE_STEP_M}，"
+                        f"對齊 legacy GT 的逐幀密度）。調大可換取採集速度")
     p.add_argument("--no-profile-ray", action="store_true",
                    help="關閉剖面向下射線（只存 waypoint 解析高度）。"
-                        "每幀多 51 次 cast_ray：同步模式下這只拉長採集的牆鐘"
-                        "時間，不影響物理與車速，趕時間才需要關")
+                        "每幀多一輪 cast_ray（點數 = max_d/step + 1）：同步模式下"
+                        "這只拉長採集的牆鐘時間，不影響物理與車速，趕時間才需要關")
     p.add_argument("--lookahead-m",   type=float, default=6.0,
                    help="pure-pursuit 橫向修正的前視距離（預設 6 m），"
                         "取代寫死 steer=0 的假設")
@@ -585,7 +599,8 @@ def main() -> None:
     total_distance_m   = 0.0   # 累計總行駛距離（含 ALIGNING/WARMUP）
     collect_distance_m = 0.0   # 僅 COLLECTING 階段的距離
     prev_location: Optional[carla.Location] = None
-    # 剖面取樣耗時（最近 50 幀）：射線模式每幀多 51 次 cast_ray。這是**牆鐘**
+    # 剖面取樣耗時（最近 50 幀）：射線模式每幀多一輪 cast_ray（點數 =
+    # max_d/step + 1，預設 401 次）。這是**牆鐘**
     # 成本，不是模擬預算 —— 同步模式下每次 world.tick() 推進固定的
     # fixed_delta_seconds，RPC 再慢也不會改變物理、PID 的 dt 或車速曲線，只會
     # 讓整趟採集在現實時間裡變久。顯示出來是為了估採集要花多久，不是為了看
@@ -607,7 +622,7 @@ def main() -> None:
         },
         "road_profile": {
             "max_d_m":     _PROFILE_MAX_D_M,
-            "step_m":      _PROFILE_STEP_M,
+            "step_m":      args.profile_step_m,
             "origin":      "camera",   # waypoint 起點是相機所在處，不是車輛原點
             "stored":      "world xyz of each waypoint (raw); pitch is a convenience column",
             "ray_mode":    not args.no_profile_ray,
@@ -695,7 +710,7 @@ def main() -> None:
                 cam_tf   = camera.get_transform()
                 _t0      = time.perf_counter()
                 profile  = sample_road_profile(
-                    carla_map, cam_tf.location,
+                    carla_map, cam_tf.location, step_m=args.profile_step_m,
                     world=None if args.no_profile_ray else world)
                 profile_ms.append((time.perf_counter() - _t0) * 1e3)
                 writer.save(image, transform, speed_mps, collect_distance_m,

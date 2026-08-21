@@ -45,12 +45,76 @@ def carla_basis(pitch_deg, yaw_deg, roll_deg):
 
 
 class RoadProfileGT:
-    """量測式 GT：每幀的路面剖面，表達在該幀的相機座標系。"""
+    """量測式 GT：每幀的路面剖面，表達在該幀的相機座標系。
 
-    def __init__(self, dataset_dir):
+    ``height_source`` 選剖面點的高度要用哪一欄：
+
+    ``"analytic"``
+        ``z`` —— waypoint 的高度，也就是 OpenDRIVE 的**解析中心線**。
+    ``"mesh"``（預設）
+        ``z_mesh`` —— 採集當下向下射線打到路面網格的高度（WWH-14 起才有這欄；
+        舊資料集沒有，會直接報錯而不是默默退回解析值）。
+
+    **預設是** ``"mesh"``（WWH-14，2026-08-22 定案）。資料集
+    `carla_dataset_Town03_20260822_000716`，三條獨立證據：
+
+    1. 偏差是真的幾何，不是 ``cast_ray`` 的假象 —— :class:`LegacyProfileGT`
+       （車身姿態，動力學）與 mesh（射線，幾何）相對 analytic 多出來的結構，
+       逐幀去均值後 corr median **+0.990**、**100%** 的幀 >0.5。兩條完全獨立
+       的量測路徑記錄到同一個東西。
+    2. 相機看得到 —— 預測相對 analytic 的偏離 vs 網格偏差，逐幀去均值 corr
+       median **+0.909**、81.2% >0.5；排列對照（別幀的形狀 / 隨機平滑曲線）
+       只有 −0.084 / −0.005（32%）。逐幀迴歸斜率 **+0.588**。
+    3. ``w_real`` 判定更接近幾何值 —— 零平均高度殘差：mesh **3.2522**、
+       analytic 3.2486，幾何值 3.2500。
+
+    官方批次（446 幀）：analytic mean 0.2688 / p90 0.7063；
+    mesh mean **0.2367** / p90 **0.4647**。
+
+    ⚠ **不要用絕對高度 MAE 判定這件事。** GT 是 ``P_world − cam_world``，換
+    ``z_mesh`` 只改剖面點；短視距幀的窗口整個落在偏差區裡，GT 曲線幾乎整條
+    平移，絕對高度 MAE 會爆掉（+132%）—— 但那是平移不是形狀，扣掉每幀常數項
+    後 mesh 反而較好。這個坑我踩過，一度得出「mesh 明顯更差」的錯誤結論。
+
+    未解：相機只看到約 **59%** 的振幅。可能是碰撞網格與渲染網格仍有細部差異，
+    也可能是 pipeline 已知的振幅衰減（pitch 振幅比真實低 0.5~1.5%）。本資料集
+    分不開 —— 偏差區段正好落在坡頂，能看到它的幀全部是短視距（可見深度中位數
+    6.14 m vs 其他 16.95 m）。
+
+    網格偏差的性質：偏差值直方圖是**雙峰** —— 62.8% 落在 ±5 mm、13.8% 落在
+    +45~+50 mm。平坦段（s=5~50）std 只有 1.67 mm，抬升段（s=62~76）平均
+    +39.75 mm，凹陷段（s=52~56）平均 −53.24 mm；二階差分的尖峰只出現在區段
+    **邊界**。像相鄰路面資產之間的接縫高差，不是三角化誤差。
+
+    ``x`` / ``y`` 兩欄不受影響：射線是垂直往下打的，只換高度。
+    """
+
+    def __init__(self, dataset_dir, height_source=None):
+        """``height_source=None``（預設）= 自動：有 ``z_mesh`` 就用，沒有就
+        退回 ``"analytic"``。明確指定 ``"mesh"`` 而資料集沒有那欄則報錯 ——
+        自動選擇是為了讓 WWH-14 之前的舊資料集照常可用，不是讓打錯的設定
+        默默生效。實際選到哪一個看 :meth:`describe`。"""
+        if height_source == "auto":      # config 用字串表示「自動」
+            height_source = None
+        if height_source not in (None, "analytic", "mesh"):
+            raise ValueError(f"height_source must be 'auto'/None, 'analytic' "
+                             f"or 'mesh', got {height_source!r}")
         dataset_dir = Path(dataset_dir)
         m = pd.read_csv(dataset_dir / "measurements.csv")
         prof = pd.read_csv(dataset_dir / "road_profile.csv")
+
+        if height_source is None:
+            height_source = "mesh" if "z_mesh" in prof.columns else "analytic"
+        z_col = "z" if height_source == "analytic" else "z_mesh"
+        if z_col not in prof.columns:
+            raise ValueError(
+                f"{dataset_dir.name}/road_profile.csv 沒有 {z_col!r} 欄"
+                f"（height_source={height_source!r}）。射線高度是 WWH-14 起才"
+                f"採集的，舊資料集只能用 height_source='analytic'。")
+        n_before = len(prof)
+        prof = prof[prof[z_col].notna()]
+        self.n_dropped = n_before - len(prof)
+
         fwd, _, up = carla_basis(m.cam_pitch_deg.to_numpy(),
                                  m.cam_yaw_deg.to_numpy(),
                                  m.cam_roll_deg.to_numpy())
@@ -58,12 +122,13 @@ class RoadProfileGT:
         pos = {int(f): i for i, f in enumerate(m.frame_id)}
 
         self.dataset_dir = dataset_dir
+        self.height_source = height_source
         self._prof = {}
         for frame_id, sub in prof.groupby("frame_id"):
             i = pos.get(int(frame_id))
             if i is None:
                 continue
-            v = sub.sort_values("d_req_m")[["x", "y", "z"]].to_numpy() - cam[i]
+            v = sub.sort_values("d_req_m")[["x", "y", z_col]].to_numpy() - cam[i]
             z, h = v @ fwd[i], v @ up[i]
             order = np.argsort(z)          # 投影後 z 未必單調（彎道/路拱）
             z, h = z[order], h[order]
@@ -71,8 +136,9 @@ class RoadProfileGT:
             self._prof[int(frame_id)] = (z[keep], h[keep])
 
     def describe(self):
-        return (f"measured road profile ({len(self._prof)} frames, "
-                f"{self.dataset_dir.name})")
+        drop = f", {self.n_dropped} pts dropped" if self.n_dropped else ""
+        return (f"measured road profile [{self.height_source}] "
+                f"({len(self._prof)} frames, {self.dataset_dir.name}{drop})")
 
     def has(self, frame_id):
         return int(frame_id) in self._prof
@@ -131,11 +197,14 @@ class LegacyProfileGT:
 
 
 def load_profile_gt(measurements_csv, *, camera_offset_m=0.0, camera_height=None,
-                    measurements=None):
-    """依資料集內容挑 GT 來源：有 road_profile.csv 就用量測式，否則回推式。"""
+                    measurements=None, height_source=None):
+    """依資料集內容挑 GT 來源：有 road_profile.csv 就用量測式，否則回推式。
+
+    ``height_source`` 只對量測式有意義，見 :class:`RoadProfileGT`。
+    """
     path = Path(measurements_csv)
     if (path.parent / "road_profile.csv").exists():
-        return RoadProfileGT(path.parent)
+        return RoadProfileGT(path.parent, height_source=height_source)
     if measurements is None:
         measurements = pd.read_csv(path)
     return LegacyProfileGT(measurements, camera_offset_m, camera_height)

@@ -37,6 +37,7 @@ f_y = config["pitch_estimation"]["f_y"]
 w_real = config["pitch_estimation"]["w_real"]
 camera_height    = config["pitch_estimation"].get("camera_height")
 camera_offset_m  = config["pitch_estimation"].get("camera_forward_offset", 0.0)
+gt_height_source = config.get("ground_truth", {}).get("height_source", "auto")
 pitch_method     = config["pitch_estimation"].get("method", "windowed")
 measurements_csv = config["csv_io"]["measurements_csv"]
 
@@ -119,7 +120,8 @@ def main():
     if Path(measurements_csv).exists():
         frame_id = int(Path(image_path).stem)
         gt = load_profile_gt(measurements_csv, camera_offset_m=camera_offset_m,
-                             camera_height=camera_height)
+                             camera_height=camera_height,
+                             height_source=gt_height_source)
         print(f"GT source: {gt.describe()}")
 
         mae = compute_pitch_mae(pitch_curve, frame_id, gt)

@@ -35,6 +35,7 @@ w_real                    = config["pitch_estimation"]["w_real"]
 camera_height             = config["pitch_estimation"].get("camera_height")
 camera_offset_m           = config["pitch_estimation"].get("camera_forward_offset", 0.0)
 pitch_method              = config["pitch_estimation"].get("method", "windowed")
+gt_height_source          = config.get("ground_truth", {}).get("height_source", "auto")
 input_csv                 = config["csv_io"]["input_dir"]
 output_csv                = config["csv_io"]["output_dir"]
 measurements_csv          = config["csv_io"]["measurements_csv"]
@@ -60,7 +61,8 @@ def _compute_mae(pitch_curve, frame_id, gt):
 def main():
     df = pd.read_csv(input_csv)
     gt = load_profile_gt(measurements_csv, camera_offset_m=camera_offset_m,
-                         camera_height=camera_height)
+                         camera_height=camera_height,
+                         height_source=gt_height_source)
     print(f"GT source: {gt.describe()}")
     model = load_pidnet(model_name, weight_path, device)
 
