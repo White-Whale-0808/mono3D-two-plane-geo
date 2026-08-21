@@ -209,6 +209,43 @@ def _pure_pursuit_steer(vehicle: carla.Vehicle, carla_map: carla.Map,
 _PROFILE_MAX_D_M = 50.0   # 採樣到相機前方幾公尺（略大於 pitch_estimation 的 z_cap 45）
 _PROFILE_STEP_M  = 1.0    # 採樣間距
 
+# 向下射線可接受的地面語意標籤（label 名稱字串比對，跨 CARLA 版本較穩）。
+# verify_carla_geometry.py 也用這份，改這裡兩邊一起動。
+GROUND_LABELS = {"Roads", "RoadLines", "Ground", "Terrain", "Sidewalks"}
+
+
+def ray_ground_z(world: carla.World, loc: carla.Location,
+                 depth: float = 6.0) -> tuple[Optional[float], Optional[str]]:
+    """
+    從 loc 垂直向下射線，回傳第一個「地面語意」命中點的 z 與其標籤。
+
+    **必須**用 label 過濾：從相機處起算的射線會先穿過引擎蓋/底盤，剖面上的
+    射線則可能打到路上的車輛或雜物。找不到地面標籤就回 None —— 不做退而求
+    其次的猜測，寧缺勿錯（否則會把車身高度當成路面高度）。
+
+    回傳的第二項在失敗時是 `"no-ground:<看到的標籤>"`，方便離線分辨「射線沒
+    命中」與「命中了但都不是地面」。
+    """
+    try:
+        end    = carla.Location(x=loc.x, y=loc.y, z=loc.z - depth)
+        points = world.cast_ray(loc, end)
+    except Exception:                                          # noqa: BLE001
+        return None, None
+    if not points:
+        return None, None
+
+    labels_seen: list[str] = []
+    for pt in points:
+        label = str(getattr(pt, "label", "")).split(".")[-1]
+        z     = float(pt.location.z)
+        if z > loc.z + 1e-6:          # 射線可能回傳起點上方的命中，忽略
+            continue
+        labels_seen.append(label)
+        if label in GROUND_LABELS:
+            return z, label
+    return None, ("no-ground:" + ",".join(labels_seen) if labels_seen else None)
+
+
 def sample_road_profile(
     carla_map:  carla.Map,
     cam_loc:    carla.Location,
