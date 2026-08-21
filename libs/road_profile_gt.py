@@ -89,7 +89,11 @@ class RoadProfileGT:
     ``x`` / ``y`` 兩欄不受影響：射線是垂直往下打的，只換高度。
     """
 
-    def __init__(self, dataset_dir, height_source=None):
+    #: pitch 的預設視窗半寬（m）。見 :meth:`pitch_at` —— 固定物理長度，
+    #: 不隨 road_profile.csv 的採樣間距變動。
+    PITCH_WINDOW_M = 1.0
+
+    def __init__(self, dataset_dir, height_source=None, pitch_window_m=None):
         """``height_source=None``（預設）= 自動：有 ``z_mesh`` 就用，沒有就
         退回 ``"analytic"``。明確指定 ``"mesh"`` 而資料集沒有那欄則報錯 ——
         自動選擇是為了讓 WWH-14 之前的舊資料集照常可用，不是讓打錯的設定
@@ -123,6 +127,8 @@ class RoadProfileGT:
 
         self.dataset_dir = dataset_dir
         self.height_source = height_source
+        self.pitch_window_m = (self.PITCH_WINDOW_M if pitch_window_m is None
+                               else float(pitch_window_m))
         self._prof = {}
         for frame_id, sub in prof.groupby("frame_id"):
             i = pos.get(int(frame_id))
@@ -138,7 +144,8 @@ class RoadProfileGT:
     def describe(self):
         drop = f", {self.n_dropped} pts dropped" if self.n_dropped else ""
         return (f"measured road profile [{self.height_source}] "
-                f"({len(self._prof)} frames, {self.dataset_dir.name}{drop})")
+                f"({len(self._prof)} frames, {self.dataset_dir.name}{drop}, "
+                f"pitch window ±{self.pitch_window_m:g} m)")
 
     def has(self, frame_id):
         return int(frame_id) in self._prof
@@ -155,18 +162,49 @@ class RoadProfileGT:
         d = np.atleast_1d(np.asarray(distances, float))
         return np.interp(d, z, h, left=np.nan, right=np.nan)
 
-    def pitch_at(self, frame_id, distances):
-        """路面 pitch（度），由剖面的局部斜率求得；超出範圍回 NaN。
+    def pitch_at(self, frame_id, distances, window_m=None):
+        """路面 pitch（度）：剖面在 ±``window_m`` 內的最小平方斜率。
 
-        注意這是**點取樣的真實斜率**，而 pipeline 的 pitch 經過 windowed
-        Theil-Sen 平滑。兩者的不對稱在有曲率的路段值得留意（實測全域約 10%
-        的 MAE 差異），但它解釋不掉尺度問題——見 WWH-13。
+        **視窗是固定的物理長度，不隨採樣密度變** —— 這是刻意的。原本這裡用
+        逐點 ``np.gradient``，在 ``_PROFILE_STEP_M = 1.0`` 的舊資料集上沒問題，
+        因為 1 m 間距的中央差分**本身就是** ±1 m 視窗。採集密度改成 0.125 m
+        之後那個隱含的低通消失，射線高度的量化誤差（0.1 mm 級）被除以 0.125 m
+        放大成斜率雜訊，mesh GT 的 MAE 從 0.2545 惡化到 0.2834，而「網格結構」
+        與 legacy GT 的相關從 +0.946 崩到 +0.312。改成顯式視窗就復原了。
+
+        analytic 來源對視窗不敏感（解析曲線本來就平滑，實測 0.2706~0.2719），
+        受影響的只有 mesh。
+
+        預設 1.0 m 的理由：正好重現舊資料集的行為（可比較），且在實測中最能
+        保留訊號。改用估測器同款的 ±max(1, 0.15z) 差不多（mesh MAE 0.2539），
+        但遠處過度平滑會沖淡結構（預測與網格的相關 0.653 -> 0.521），而且會讓
+        GT 耦合到估測器的參數。
+
+        ⚠ 這仍與 pipeline 的 pitch 不完全對等：後者是 Theil-Sen（穩健中位數
+        斜率），這裡是最小平方。有曲率的路段兩者會有差異。
         """
         if not self.has(frame_id):
             return np.full(len(np.atleast_1d(distances)), np.nan)
         z, h = self._prof[int(frame_id)]
         d = np.atleast_1d(np.asarray(distances, float))
-        slope = np.interp(d, z, np.gradient(h, z), left=np.nan, right=np.nan)
+        half = self.pitch_window_m if window_m is None else float(window_m)
+
+        lo = np.searchsorted(z, d - half)
+        hi = np.searchsorted(z, d + half, side="right")
+        slope = np.full(len(d), np.nan)
+        for i, (a, b) in enumerate(zip(lo, hi)):
+            if b - a >= 3:
+                x, y = z[a:b], h[a:b]
+                var = x.var()
+                if var > 1e-12:
+                    slope[i] = (np.mean(x * y) - x.mean() * y.mean()) / var
+        # 視窗湊不到 3 點（剖面太稀、或查詢點落在剖面兩端）才退回逐點微分
+        gap = ~np.isfinite(slope)
+        if gap.any():
+            slope[gap] = np.interp(d[gap], z, np.gradient(h, z),
+                                   left=np.nan, right=np.nan)
+        out_of_range = (d < z[0]) | (d > z[-1])
+        slope[out_of_range] = np.nan
         return np.degrees(np.arctan(slope))
 
 

@@ -5,8 +5,8 @@ model:
   # weight_path: "models/road_segmentation_best.pth"  # The original Resnet101 model is too slow and not accurate enough, so we switched to PIDNet_L 
 
 input:
-  image_path: "inference_datasets/carla_dataset_Town03_20260822_000716/images/000380.png"
-  image_batch_path: "inference_datasets/carla_dataset_Town03_20260822_000716/images"
+  image_path: "inference_datasets/carla_dataset_Town03_20260822_021432/images/000380.png"
+  image_batch_path: "inference_datasets/carla_dataset_Town03_20260822_021432/images"
   resize_size:
     - 512
     - 1024
@@ -126,8 +126,8 @@ visualization:
   save_path: "outputs/result.png"
 
 csv_io:
-  input_dir: "inference_datasets/carla_dataset_Town03_20260822_000716/measurements.csv"
+  input_dir: "inference_datasets/carla_dataset_Town03_20260822_021432/measurements.csv"
   output_dir: "outputs/measurements.csv"
-  measurements_csv: "inference_datasets/carla_dataset_Town03_20260822_000716/measurements.csv"
+  measurements_csv: "inference_datasets/carla_dataset_Town03_20260822_021432/measurements.csv"
   problem_csv: "outputs/problem.csv"  # Frames with profile_mae above problem_mae_threshold, sorted worst-first
   problem_mae_threshold: 2.0  # Degrees; frames above this are flagged in problem_csv
