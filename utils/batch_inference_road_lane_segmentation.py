@@ -12,6 +12,7 @@ from libs.inference.lane_fitting import inner_chain_points, refine_inner_points,
 from libs.inference.pitch_estimation import estimate_pitch_from_curves
 from libs.road_profile_gt import load_profile_gt
 from libs.visualization.profile_mae_visualization import plot_profile_mae
+from libs.visualization.route_profile_visualization import plot_route_profile
 import traceback
 
 with open("config/inference_road_lane_segmentation.yaml", "r", encoding="utf-8") as f:
@@ -148,8 +149,15 @@ def main():
     problem_df.to_csv(problem_csv, index=False)
     print(f"problem frames (mae > {problem_mae_threshold}): {len(problem_df)} -> {problem_csv}")
 
-    plot_path = plot_profile_mae(df, save_path="outputs/profile_mae.png")
+    # 圖檔帶資料集名，連續跑多份資料集才不會互相覆蓋（CSV 仍照 config 走）
+    dataset_dir = Path(measurements_csv).parent
+    plot_path = plot_profile_mae(
+        df, save_path=f"outputs/profile_mae_{dataset_dir.name}.png",
+        title=f"Per-frame profile MAE — {dataset_dir.name}")
     print(f"MAE plot: {plot_path}")
+
+    if (dataset_dir / "road_profile.csv").exists():
+        print(f"route profile plot: {plot_route_profile(dataset_dir, df)}")
 
 
 if __name__ == "__main__":

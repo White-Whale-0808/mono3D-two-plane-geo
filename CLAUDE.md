@@ -23,7 +23,8 @@ PIDNet weights must be placed in `pidnet_pretrained_model/PIDNet_L_Cityscapes_te
 # Single image inference with visualization
 python -m utils.inference_road_lane_segmentation
 
-# Batch inference (CSV in/out)
+# Batch inference (CSV in/out; also writes outputs/profile_mae_<dataset>.png and
+# outputs/route_profile_<dataset>.png — the whole-route terrain profile)
 python -m utils.batch_inference_road_lane_segmentation
 
 # CARLA real-time test (requires running CARLA server)
