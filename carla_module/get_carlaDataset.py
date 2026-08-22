@@ -6,6 +6,7 @@ CARLA 資料集蒐集腳本：蒐集 RGB 影像與 GT pitch／速度／行駛距
     uv run python carla_module/get_carlaDataset.py [--host HOST] [--port PORT]
         [--speed KMH] [--camera-fps N] [--z-offset N]
         [--align-frames N] [--warmup-frames N] [--lookahead-m N]
+        [--route-length-m N] [--route-dest X,Y[,Z]]
         [--kp F] [--ki F] [--kd F] [--ff-gain F]
 
 狀態機流程：
@@ -13,16 +14,27 @@ CARLA 資料集蒐集腳本：蒐集 RGB 影像與 GT pitch／速度／行駛距
        ↓
     [ALIGNING]   TM autopilot 對齊車道（連續 --align-frames 幀 steer < 0.05）
        ↓
-    [WARMUP]     關閉 TM，PID+FF 控制 + pure-pursuit 橫向修正，等 --warmup-frames 幀讓物理穩定
+    〈規劃路線〉 以對齊後的位置為起點，一次算完整條路線（見下）
        ↓
-    [COLLECTING] PID+FF 控制 + pure-pursuit 橫向修正，存圖 + GT 量測，按 'q' 停止
+    [WARMUP]     關閉 TM，PID+FF 控制 + 沿路線 pure-pursuit，等 --warmup-frames 幀讓物理穩定
+       ↓
+    [COLLECTING] PID+FF 控制 + 沿路線 pure-pursuit，存圖 + GT 量測，
+                 按 'q' 或路線走完即停止
 
     橫向控制說明：ALIGNING 只保證 TM 轉向輸出連續幾幀 < 0.05，不保證航向零
-    誤差；早期版本切到手動後直接 steer=0 寫死，假設接下來的路完全筆直，路
+    誤差；最早的版本切到手動後直接 steer=0 寫死，假設接下來的路完全筆直，路
     稍有彎或殘留航向誤差就會在整段收集距離上不受控漂移，可能跨到隔壁車道
     （carla_module/verify_carla_geometry.py 的驗證報告第⑥項可以量出這個問題）。
-    現在改用 `_pure_pursuit_steer`（沿車道中心線前視 `--lookahead-m`，預設
-    6m）持續修正，縱向（throttle/brake）仍是同一套 PID+FF 不變。
+    改成 pure-pursuit 之後漂移解決了，但又冒出第二個問題：它每幀都重新問地圖
+    「我現在在哪條車道」，到路口會被轉彎銜接車道吸走（詳見 `Route` 的
+    docstring）。現在**路線在開始行駛前就一次決定好**，行駛時只沿著那條折線
+    走、不再問地圖，路口才真的不會轉錯。縱向（throttle/brake）仍是同一套
+    PID+FF 不變。
+
+    路線怎麼來：預設 `build_route_straight` —— 從對齊後的位置沿車道往前
+    `--route-length-m` 公尺，每遇分岔都選最接近直走的分支。想採「會轉彎」的
+    路線就用 `--route-dest X,Y[,Z]` 指定終點，改由 CARLA 內建的
+    GlobalRoutePlanner 做 A* 規劃。
 
 儲存路徑：outputs/carla_dataset_{Map}_{YYYYMMDD_HHMMSS}/
     ├── images/         000000.png, 000001.png, ...
@@ -176,27 +188,262 @@ def _wrap_deg(angle: float) -> float:
     return (angle + 180.0) % 360.0 - 180.0
 
 
-def _pure_pursuit_steer(vehicle: carla.Vehicle, carla_map: carla.Map,
-                        lookahead_m: float) -> float:
+# ── 路線：開始行駛前就決定好，行駛中不再查地圖 ────────────────────────────────
+
+_ROUTE_STEP_M = 0.5   # 路線點間距。steer 會沿折線內插，不需要更密
+
+
+def _straightest_next(nxts: list, fwd: carla.Vector3D) -> carla.Waypoint:
+    """從 `wp.next()` 的候選裡挑最接近「直走」的分支。
+
+    路口一次會跳出好幾個銜接車道，取 `[0]` 等於隨機選一條。
+    `build_route_straight` 與 `sample_road_profile` 共用這個規則。
     """
-    取代早期版本寫死的 steer=0.0。ALIGNING 只保證 TM 轉向輸出
+    return max(nxts, key=lambda w: w.transform.get_forward_vector().dot(fwd))
+
+
+class Route:
+    """一條**在開始行駛前就決定好**的路線，行駛時只沿著它走。
+
+    為什麼非得預先決定：pure-pursuit 的前一版每幀都用
+    `carla_map.get_waypoint(車輛位置, project_to_road=True)` 重新找參考車道。
+    路口裡的**轉彎銜接車道也是 Driving 車道**，車子只要稍微偏離中心，這個
+    查詢就可能吸附到左/右轉那條銜接車道上；pure-pursuit 於是朝它轉，車子更
+    靠過去，下一幀吸得更死 —— 正回饋，車就轉走了。只在 `wp.next()` 的候選裡
+    挑「最直」的分支救不回來，因為選錯發生在更前面的 `get_waypoint()` 那步。
+
+    這裡把路線先算好存成折線，行駛時 cursor **只單調前進**、不再問地圖
+    「我現在在哪條車道」，路口自然拉不走。
+    """
+
+    # cursor 每幀往前搜尋的點數上限。18 km/h @ 40 fps 每幀前進 0.125 m，
+    # 200 點 × 0.5 m = 100 m 綽綽有餘，又不必每幀掃完整條路線
+    _SEARCH_WINDOW = 200
+
+    def __init__(self, points: list) -> None:
+        """`points` 是一串 carla.Location（車道中心線上的點）。
+
+        存 Location 而不是 Waypoint：路線可能來自地圖規劃，也可能來自
+        `pick_route.py` 存下來的 JSON —— 後者根本沒有 Waypoint 物件可用。
+        """
+        self._pts = list(points)
+        self._s   = [0.0]                      # 累積弧長
+        for a, b in zip(self._pts, self._pts[1:]):
+            self._s.append(self._s[-1] + a.distance(b))
+        self._cursor = 0
+
+    def __len__(self) -> int:
+        return len(self._pts)
+
+    @property
+    def points(self) -> list:
+        """路線折線點（carla.Location），給存檔／繪圖用。"""
+        return self._pts
+
+    @property
+    def length_m(self) -> float:
+        return self._s[-1] if self._s else 0.0
+
+    def remaining_m(self) -> float:
+        """cursor 之後還剩多少路線 —— 用來判斷該不該收工。"""
+        return self.length_m - self._s[self._cursor] if self._pts else 0.0
+
+    def advance(self, loc: carla.Location) -> float:
+        """把 cursor 推進到離 loc 最近的路線點，回傳橫向偏差（m）。
+
+        只往前找、不回頭：這正是它在路口不會被拉走的原因。
+        """
+        best_i = self._cursor
+        best_d = self._pts[best_i].distance(loc)
+        for i in range(self._cursor + 1,
+                       min(self._cursor + self._SEARCH_WINDOW, len(self._pts))):
+            d = self._pts[i].distance(loc)
+            if d < best_d:
+                best_i, best_d = i, d
+        self._cursor = best_i
+        return best_d
+
+    def lookahead_point(
+        self, loc: carla.Location, lookahead_m: float
+    ) -> tuple[Optional[carla.Location], float]:
+        """回傳 (前視目標點, 橫向偏差)。空路線回傳 (None, 0.0)。
+
+        快走完時目標點就停在路線終點 —— 由 `remaining_m()` 負責喊停，
+        這裡不做外插。
+        """
+        if not self._pts:
+            return None, 0.0
+        lateral  = self.advance(loc)
+        s_target = self._s[self._cursor] + lookahead_m
+        j = self._cursor
+        while j + 1 < len(self._s) and self._s[j] < s_target:
+            j += 1
+        return self._pts[j], lateral
+
+
+def build_route_straight(
+    carla_map: carla.Map,
+    start_loc: carla.Location,
+    length_m:  float,
+    step_m:    float = _ROUTE_STEP_M,
+    start_fwd: Optional[carla.Vector3D] = None,
+) -> Route:
+    """從 start_loc 沿目前車道往前 length_m，每遇分岔都選最接近直走的分支。
+
+    選路只做一次，而且是從**乾淨的車道朝向**做的。行駛中車身會因懸吊、殘留
+    航向誤差而歪，但那時候路線早就定案了，歪不到選路頭上。
+
+    `start_fwd` 給車輛當下的前向量：起點萬一落在路口裡，`get_waypoint()` 可能
+    傳回某條轉彎銜接車道，那條車道的朝向不能拿來判斷「哪邊算直走」，要用車頭
+    自己的朝向。不給就退回用起點 waypoint 的朝向。
+    """
+    wp = carla_map.get_waypoint(start_loc, project_to_road=True)
+    if wp is None:
+        return Route([])
+    if wp.is_junction:
+        print("[警告] 路線起點就在路口內，規劃出來的方向可能不是你要的；"
+              "建議把起點移到路口前後的直路段再採集")
+
+    route    = [wp]
+    prev_fwd = start_fwd if start_fwd is not None else wp.transform.get_forward_vector()
+    d = 0.0
+    while d < length_m - 1e-6:
+        nxts = wp.next(step_m)
+        if not nxts:
+            break                     # 路盡頭：路線到此為止，不猜測
+        wp       = _straightest_next(nxts, prev_fwd)
+        prev_fwd = wp.transform.get_forward_vector()
+        route.append(wp)
+        d += step_m
+    return Route([w.transform.location for w in route])
+
+
+def build_route_to(
+    carla_map: carla.Map,
+    start_loc: carla.Location,
+    dest_loc:  carla.Location,
+    step_m:    float = _ROUTE_STEP_M,
+) -> Route:
+    """用 CARLA 內建的 GlobalRoutePlanner 從 start_loc 規劃到 dest_loc。
+
+    與 `build_route_straight` 的差別是**可以含轉彎**：想採一段特定的、會過
+    路口的路線時用這個指定終點。路線一樣是行駛前就定好的，所以 `Route` 講的
+    那個路口吸附問題照樣不會發生。
+
+    延後 import：GRP 需要 CARLA 內建的 agents 套件與 networkx，而預設的
+    `build_route_straight` 兩者都不需要 —— 不指定終點就不該為此裝東西。
+    """
+    try:
+        from agents.navigation.global_route_planner import GlobalRoutePlanner
+    except ImportError as exc:                                  # noqa: BLE001
+        raise RuntimeError(
+            "--route-dest 需要 CARLA 內建的 agents 套件與 networkx："
+            "CARLA_WHL_PATH 往上兩層要有 agents/ 目錄（隨 CARLA 附帶）。"
+            f"原始錯誤：{exc}"
+        ) from exc
+
+    grp  = GlobalRoutePlanner(carla_map, step_m)
+    plan = grp.trace_route(start_loc, dest_loc)   # [(waypoint, RoadOption), ...]
+    return Route([wp.transform.location for wp, _ in plan])
+
+
+# 路線 JSON 的格式版本。`pick_route.py` 寫、這裡讀，兩邊都認這個號碼
+ROUTE_FILE_VERSION = 1
+
+
+def load_route_file(path: pathlib.Path, carla_map: carla.Map) -> Route:
+    """讀 `pick_route.py` 存下來的路線 JSON。
+
+    會擋掉地圖不符：路線點是世界座標，套到另一張地圖上會落在莫名其妙的地方，
+    而且多半還是「看起來能跑」的那種錯 —— 寧可在這裡直接停下來。
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"找不到路線檔：{path}") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"路線檔不是合法 JSON：{path}（{exc}）") from exc
+
+    version = data.get("version")
+    if version != ROUTE_FILE_VERSION:
+        raise RuntimeError(
+            f"路線檔版本不符：檔案是 {version}，這支腳本認得 {ROUTE_FILE_VERSION}。"
+            f"請用現在的 pick_route.py 重新選一次路線"
+        )
+
+    file_map = data.get("map")
+    if file_map and file_map != carla_map.name:
+        raise RuntimeError(
+            f"路線檔是在地圖 {file_map} 上選的，現在連到的是 {carla_map.name}。"
+            f"世界座標不通用，請切換地圖或重新選路線"
+        )
+
+    pts = data.get("points") or []
+    if len(pts) < 2:
+        raise RuntimeError(f"路線檔只有 {len(pts)} 個點，至少要 2 個：{path}")
+
+    route = Route([carla.Location(x=p[0], y=p[1], z=p[2]) for p in pts])
+    print(f"[路線] 載入 {path.name}：{route.length_m:.1f} m / {len(route)} 點"
+          f"（{data.get('mode', '?')} 模式，行駛中不再查地圖）")
+    return route
+
+
+def route_start_transform(route: Route, heading_span_m: float = 3.0) -> carla.Transform:
+    """路線起點的生成姿態：位置取第一個點，車頭朝向路線前方。
+
+    朝向不是拿相鄰兩點算的 —— 點距只有 0.5 m，量化誤差會讓朝向抖得很厲害。
+    改成往前找約 `heading_span_m` 公尺的點再算方位角，穩定得多。
+    """
+    pts   = route.points
+    start = pts[0]
+
+    ahead = pts[-1]
+    for p in pts[1:]:
+        if start.distance(p) >= heading_span_m:
+            ahead = p
+            break
+
+    yaw = math.degrees(math.atan2(ahead.y - start.y, ahead.x - start.x))
+    # 抬高一點再生成：起點 z 是車道**路面**高度，直接放車子會卡進地面
+    return carla.Transform(
+        carla.Location(x=start.x, y=start.y, z=start.z + 0.5),
+        carla.Rotation(yaw=yaw),
+    )
+
+
+def _pure_pursuit_steer(vehicle: carla.Vehicle, carla_map: carla.Map,
+                        lookahead_m: float,
+                        route: Optional[Route] = None) -> float:
+    """
+    取代最早版本寫死的 steer=0.0。ALIGNING 只保證 TM 轉向輸出
     連續幾幀 < 0.05，不保證航向零誤差；WARMUP/COLLECTING 加起來往往是幾十到
     上百公尺，路稍有彎或殘留一點航向誤差，steer=0 會讓車子不受控地橫向漂移，
     可能跨到隔壁車道，把整批資料的 GT 對應關係搞錯。
 
-    做法：沿目前車道中心線往前 lookahead_m 找一個目標點，算目標點相對車頭
-    朝向的夾角，轉成 [-1, 1] 的 steer 修正量（簡化版 pure-pursuit）。
-    """
-    tf = vehicle.get_transform()
-    wp = carla_map.get_waypoint(tf.location, project_to_road=True)
-    if wp is None:
-        return 0.0
-    nxt = wp.next(lookahead_m)
-    if not nxt:
-        return 0.0
-    target = nxt[0].transform.location
+    做法：往前 lookahead_m 取一個目標點，算它相對車頭朝向的夾角，轉成
+    [-1, 1] 的 steer 修正量（簡化版 pure-pursuit）。
 
+    給了 `route` 就沿那條預先規劃好的折線取目標點 —— 這是採集時該走的路，
+    路口不會被拉走。沒給就退回每幀查地圖的舊行為（`verify_carla_geometry.py`
+    與 `project_lane_gt.py` 走這條，它們只在直路上短程行駛）；舊行為在路口
+    會轉錯，原因見 `Route` 的 docstring。
+    """
+    tf  = vehicle.get_transform()
     fwd = tf.get_forward_vector()
+
+    if route is not None:
+        target, _ = route.lookahead_point(tf.location, lookahead_m)
+        if target is None:
+            return 0.0
+    else:
+        wp = carla_map.get_waypoint(tf.location, project_to_road=True)
+        if wp is None:
+            return 0.0
+        nxts = wp.next(lookahead_m)
+        if not nxts:
+            return 0.0
+        target = _straightest_next(nxts, fwd).transform.location
+
     heading      = math.degrees(math.atan2(fwd.y, fwd.x))
     to_target_x  = target.x - tf.location.x
     to_target_y  = target.y - tf.location.y
@@ -309,7 +556,7 @@ def sample_road_profile(
         nxts = wp.next(step_m)
         if not nxts:
             break   # 路盡頭：剖面就到此為止，不猜測
-        wp = max(nxts, key=lambda w: w.transform.get_forward_vector().dot(prev_fwd))
+        wp = _straightest_next(nxts, prev_fwd)
         prev_fwd = wp.transform.get_forward_vector()
         d += step_m
         walked.append((d, wp))
@@ -334,9 +581,14 @@ def apply_pid_ff_control_with_steering(
     pid:         PIDController,
     ff_gain:     float,
     lookahead_m: float,
+    route:       Optional[Route] = None,
 ) -> tuple[float, float]:
     """
     PID+FF 縱向 + pure-pursuit 橫向，同一輪算好後一次 apply_control 送出。
+
+    `route` 是選用的：給了就沿預先規劃的路線走（採集用），沒給就退回每幀
+    查地圖的舊行為。參數擺在最後且有預設值，是為了讓既有以位置引數呼叫的
+    `verify_carla_geometry.py` / `project_lane_gt.py` 不用改。
 
     早期版本是「先送出縱向控制（steer 寫死 0）→ 用 vehicle.get_control()
     讀回來 → 疊加 steer → 再 apply_control 一次」，看似安全（CARLA 只認每個
@@ -348,7 +600,7 @@ def apply_pid_ff_control_with_steering(
     一次送出。
     """
     throttle, brake, speed, slope_deg = _compute_pid_ff(vehicle, target_mps, pid, ff_gain)
-    steer = _pure_pursuit_steer(vehicle, carla_map, lookahead_m)
+    steer = _pure_pursuit_steer(vehicle, carla_map, lookahead_m, route)
     vehicle.apply_control(carla.VehicleControl(
         throttle=throttle, steer=steer, brake=brake,
         hand_brake=False, manual_gear_shift=False))
@@ -356,6 +608,22 @@ def apply_pid_ff_control_with_steering(
 
 
 # ── 引數 ──────────────────────────────────────────────────────────────────────
+
+def _parse_dest(s: str) -> carla.Location:
+    """`--route-dest` 的 "X,Y" 或 "X,Y,Z"（世界座標，公尺）。
+
+    只給 X,Y 時 z 填 0：GlobalRoutePlanner 會把終點投影到路面，高度不重要。
+    """
+    try:
+        parts = [float(v) for v in s.split(",")]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"--route-dest 需要數字：{s}") from exc
+    if len(parts) == 2:
+        parts.append(0.0)
+    if len(parts) != 3:
+        raise argparse.ArgumentTypeError(f"--route-dest 格式為 X,Y 或 X,Y,Z，收到：{s}")
+    return carla.Location(x=parts[0], y=parts[1], z=parts[2])
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="CARLA 資料集蒐集")
@@ -380,6 +648,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lookahead-m",   type=float, default=6.0,
                    help="pure-pursuit 橫向修正的前視距離（預設 6 m），"
                         "取代寫死 steer=0 的假設")
+    # ── 路線（行駛前就決定好，見 Route 的 docstring）──────────────────────
+    p.add_argument("--route-length-m", type=float, default=1000.0,
+                   help="預設（直走）路線要規劃多長，公尺（預設 1000）。"
+                        "路線走完就自動停止採集；路提早到盡頭則路線提早結束")
+    p.add_argument("--route-dest", type=_parse_dest, default=None, metavar="X,Y[,Z]",
+                   help="指定終點世界座標，改用 CARLA 的 GlobalRoutePlanner "
+                        "規劃路線（可含轉彎）。不給則從對齊後的位置一路直走")
+    p.add_argument("--route-file", default=None, metavar="JSON",
+                   help="載入 carla_module/pick_route.py 存下來的路線 JSON。"
+                        "車輛會生成在路線起點（不看 spectator），路線直接用檔案裡"
+                        "的點，不重新規劃。優先於 --route-dest / --route-length-m")
     # ── PID + FF 參數（可在命令列覆寫）──────────────────────────────────────
     p.add_argument("--kp",      type=float, default=1.0,
                    help="PID 比例增益（預設 1.0，調大反應更快但易震盪）")
@@ -449,11 +728,22 @@ class DatasetWriter:
 
         # 掛載參數寫進資料集本身：現在推論 config 的 camera_forward_offset /
         # camera_height 是手抄過去的，兩邊沒有任何連結，改一邊另一邊不會知道
-        with open(self.save_dir / "metadata.json", "w", encoding="utf-8") as f:
-            json.dump(metadata, f, indent=2, ensure_ascii=False)
+        self._metadata = metadata
+        self._flush_metadata()
 
         self._count = 0
         print(f"[資料集] 儲存至：{self.save_dir}")
+
+    def _flush_metadata(self) -> None:
+        with open(self.save_dir / "metadata.json", "w", encoding="utf-8") as f:
+            json.dump(self._metadata, f, indent=2, ensure_ascii=False)
+
+    def update_metadata(self, patch: dict) -> None:
+        """補寫 metadata。路線要等 ALIGNING 結束、車輛位置定了才算得出來，
+        但資料集目錄在那之前就得建好（ALIGNING 期間的 print 要有地方指），
+        所以分兩次寫。"""
+        self._metadata.update(patch)
+        self._flush_metadata()
 
     @property
     def count(self) -> int:
@@ -529,10 +819,23 @@ def main() -> None:
     print(f"[初始化] 連線至地圖：{carla_map.name}")
     bp_lib = world.get_blueprint_library()
 
+    # ── 路線檔（有的話，起點與路線都由它決定）────────────────────────────────
+    preplanned: Optional[Route] = None
+    if args.route_file:
+        preplanned = load_route_file(pathlib.Path(args.route_file), carla_map)
+
     # ── 生成車輛 ──────────────────────────────────────────────────────────────
-    vehicle_bp      = bp_lib.find("vehicle.tesla.model3")
-    spectator       = world.get_spectator()
-    spawn_transform = spectator.get_transform()
+    vehicle_bp = bp_lib.find("vehicle.tesla.model3")
+    if preplanned is not None:
+        # 生成在路線起點、車頭朝路線方向。走這條就不看 spectator 了 ——
+        # 路線是在俯視圖上挑的，起點理應由路線決定，再要求使用者手動把鏡頭
+        # 對到同一個地方只是多一個出錯的機會
+        spawn_transform = route_start_transform(preplanned)
+        origin_desc     = f"路線檔起點（{args.route_file}）"
+    else:
+        spectator       = world.get_spectator()
+        spawn_transform = spectator.get_transform()
+        origin_desc     = "spectator 位置"
     spawn_transform.location.z    += args.z_offset
     spawn_transform.rotation.pitch = 0.0
     spawn_transform.rotation.roll  = 0.0
@@ -540,11 +843,11 @@ def main() -> None:
     vehicle: carla.Vehicle = world.try_spawn_actor(vehicle_bp, spawn_transform)
     if vehicle is None:
         raise RuntimeError(
-            "無法在 spectator 位置生成車輛，請移動鏡頭到可通行路面，"
-            "或以 --z-offset 調整偏移量（預設 0）"
+            f"無法在{origin_desc}生成車輛（可能不在可通行路面上、或該處已有物體），"
+            "請換個起點，或以 --z-offset 調整偏移量（預設 0）"
         )
     vehicle.set_autopilot(False)
-    print(f"[初始化] 車輛生成於：{spawn_transform.location}")
+    print(f"[初始化] 車輛生成於{origin_desc}：{spawn_transform.location}")
 
     TARGET_SPEED_MPS = args.speed / 3.6
 
@@ -590,10 +893,19 @@ def main() -> None:
     tm.ignore_lights_percentage(vehicle, 100.0)
     tm.ignore_signs_percentage(vehicle,  100.0)
     tm.set_desired_speed(vehicle, args.speed)
+    # TM 是完整導航，遇路口會照自己的邏輯選路 —— ALIGNING 通常只有不到一秒，
+    # 但起點就在路口前的話它照樣會轉走，那之後規劃的路線就不是你要的那條了。
+    # 這裡叫它一路直走；此 API 不是每個版本都有，沒有就只是回到舊行為
+    try:
+        tm.set_route(vehicle, ["Straight"] * 20)
+    except (AttributeError, RuntimeError) as exc:                # noqa: BLE001
+        print(f"[警告] TM set_route 不可用（{exc}）；"
+              f"ALIGNING 期間若遇路口可能被 TM 轉走")
 
     state          = State.ALIGNING
     align_counter  = 0
     warmup_counter = 0
+    route: Optional[Route] = None
 
     # ── 距離追蹤 ──────────────────────────────────────────────────────────────
     total_distance_m   = 0.0   # 累計總行駛距離（含 ALIGNING/WARMUP）
@@ -692,13 +1004,56 @@ def main() -> None:
                 if align_counter >= args.align_frames:
                     vehicle.set_autopilot(False)
                     pid.reset()   # 切換後清除積分，避免舊值干擾
+
+                    # 路線在這裡定案：起點是**對齊完成後**的車輛位置，車頭已
+                    # 經順著車道，選分岔時的朝向才乾淨。從生成點規劃不行 ——
+                    # ALIGNING 期間 TM 已經把車開走了一段
+                    if preplanned is not None:
+                        # 路線檔的點就是要走的路，重新規劃只會把選好的路蓋掉。
+                        # ALIGNING 期間 TM 會把車往前開一小段，Route 的 cursor
+                        # 自己會前進到對應位置，不需要特別處理
+                        route      = preplanned
+                        route_mode = f"file {args.route_file}"
+                    elif args.route_dest is not None:
+                        route = build_route_to(
+                            carla_map, cur_location, args.route_dest)
+                        route_mode = f"dest {args.route_dest}"
+                    else:
+                        route = build_route_straight(
+                            carla_map, cur_location, args.route_length_m,
+                            start_fwd=transform.get_forward_vector())
+                        route_mode = f"straight {args.route_length_m:.0f} m"
+
+                    if len(route) < 2:
+                        raise RuntimeError(
+                            f"路線規劃失敗（{route_mode}）：只得到 {len(route)} 個點。"
+                            f"起點可能不在可行駛路面上，或終點無法到達"
+                        )
+                    print(f"[路線] {route_mode} → 實際 {route.length_m:.1f} m / "
+                          f"{len(route)} 點（行駛中不再查地圖）")
+                    writer.update_metadata({"route": {
+                        "mode":       ("file" if preplanned is not None else
+                                       "dest" if args.route_dest else "straight"),
+                        "requested":  (args.route_file if preplanned is not None else
+                                       f"{args.route_dest.x},{args.route_dest.y},"
+                                       f"{args.route_dest.z}" if args.route_dest
+                                       else args.route_length_m),
+                        "planned_m":  round(route.length_m, 2),
+                        "points":     len(route),
+                        "step_m":     _ROUTE_STEP_M,
+                        "start":      [round(cur_location.x, 3),
+                                       round(cur_location.y, 3),
+                                       round(cur_location.z, 3)],
+                    }})
+
                     state          = State.WARMUP
                     warmup_counter = 0
                     print(f"[{state}] TM 已關閉，等待 {args.warmup_frames} 幀物理穩定...")
 
             elif state == State.WARMUP:
                 speed_mps, slope_deg = apply_pid_ff_control_with_steering(
-                    vehicle, carla_map, TARGET_SPEED_MPS, pid, ff_gain, args.lookahead_m)
+                    vehicle, carla_map, TARGET_SPEED_MPS, pid, ff_gain,
+                    args.lookahead_m, route)
                 warmup_counter += 1
                 if warmup_counter >= args.warmup_frames:
                     state = State.COLLECTING
@@ -706,7 +1061,8 @@ def main() -> None:
 
             elif state == State.COLLECTING:
                 speed_mps, slope_deg = apply_pid_ff_control_with_steering(
-                    vehicle, carla_map, TARGET_SPEED_MPS, pid, ff_gain, args.lookahead_m)
+                    vehicle, carla_map, TARGET_SPEED_MPS, pid, ff_gain,
+                    args.lookahead_m, route)
                 cam_tf   = camera.get_transform()
                 _t0      = time.perf_counter()
                 profile  = sample_road_profile(
@@ -715,6 +1071,12 @@ def main() -> None:
                 profile_ms.append((time.perf_counter() - _t0) * 1e3)
                 writer.save(image, transform, speed_mps, collect_distance_m,
                             cam_tf, profile)
+
+                # 路線走完就收工。繼續開下去就沒有預定路線可循了，等於退回
+                # 每幀查地圖的舊行為，正是路口會轉錯的那種狀態
+                if route is not None and route.remaining_m() < args.lookahead_m:
+                    print(f"[路線] 已走完 {route.length_m:.1f} m，停止採集")
+                    break
 
             # ── 顯示視窗 ──────────────────────────────────────────────────────
             arr     = np.frombuffer(image.raw_data, dtype=np.uint8)
@@ -742,11 +1104,18 @@ def main() -> None:
                         f"Dist(total): {total_distance_m:.1f} m  "
                         f"Dist(collect): {collect_distance_m:.1f} m",
                         (10, 126),    font, 0.8, (180, 255, 180), 2, cv2.LINE_AA)
+            if route is not None:
+                # 橫向偏差是「有沒有乖乖跟著路線」的直接指標：正常應該是幾公分，
+                # 持續變大就代表 pure-pursuit 沒跟上（不是路口選錯了）
+                cv2.putText(display,
+                            f"Route: {route.remaining_m():.0f} m left  "
+                            f"Lateral: {route.advance(cur_location) * 100:.0f} cm",
+                            (10, 158),    font, 0.8, (255, 200, 120), 2, cv2.LINE_AA)
             if profile_ms:
                 cv2.putText(display,
                             f"Profile: {sum(profile_ms) / len(profile_ms):.1f} ms/frame "
                             f"wall-clock  (ray {'off' if args.no_profile_ray else 'on'})",
-                            (10, 158),    font, 0.8, (200, 200, 255), 2, cv2.LINE_AA)
+                            (10, 190),    font, 0.8, (200, 200, 255), 2, cv2.LINE_AA)
             cv2.putText(display,
                         "Press Q to stop",
                         (10, h - 12), font, 0.7, (200, 200, 200), 2, cv2.LINE_AA)
