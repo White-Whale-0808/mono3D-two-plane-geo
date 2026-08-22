@@ -39,7 +39,11 @@ camera_height    = config["pitch_estimation"].get("camera_height")
 camera_offset_m  = config["pitch_estimation"].get("camera_forward_offset", 0.0)
 gt_height_source = config.get("ground_truth", {}).get("height_source", "auto")
 pitch_method     = config["pitch_estimation"].get("method", "windowed")
-measurements_csv = config["csv_io"]["measurements_csv"]
+# GT 取自影像自己的資料集（<dataset>/images/000200.png -> <dataset>/measurements.csv），
+# 不看 csv_io.measurements_csv —— 那個鍵是 batch 用的。兩邊指到不同資料集時，單張
+# 推論會把影像配上另一份資料集的同編號幀而完全不報錯（2026-08-22：down_hile 的影像
+# 配上 full_road 第 200 幀，GT 畫成一條平線，看起來像下坡 GT 算錯）。
+measurements_csv = Path(image_path).parent.parent / "measurements.csv"  # .parent 對短路徑不會爆
 
 
 def compute_pitch_mae(pitch_curve, frame_id, gt):
@@ -117,7 +121,9 @@ def main():
     print(f"pitch estimation:    {(t5-t4)*1000:.1f} ms")
 
     gt, frame_id = None, None
-    if Path(measurements_csv).exists():
+    if not measurements_csv.exists():
+        print(f"GT: skipped (no {measurements_csv})")
+    else:
         frame_id = int(Path(image_path).stem)
         gt = load_profile_gt(measurements_csv, camera_offset_m=camera_offset_m,
                              camera_height=camera_height,
