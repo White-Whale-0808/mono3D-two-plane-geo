@@ -192,6 +192,10 @@ def _wrap_deg(angle: float) -> float:
 
 _ROUTE_STEP_M = 0.5   # 路線點間距。steer 會沿折線內插，不需要更密
 
+#: 開始採集時離路線多遠就警告（m）。3.5 m 車道的一半 —— 超過這個值，車八成
+#: 已經在隔壁車道上了
+_LATERAL_WARN_M = 1.75
+
 
 def _straightest_next(nxts: list, fwd: carla.Vector3D) -> carla.Waypoint:
     """從 `wp.next()` 的候選裡挑最接近「直走」的分支。
@@ -216,9 +220,15 @@ class Route:
     「我現在在哪條車道」，路口自然拉不走。
     """
 
-    # cursor 每幀往前搜尋的點數上限。18 km/h @ 40 fps 每幀前進 0.125 m，
-    # 200 點 × 0.5 m = 100 m 綽綽有餘，又不必每幀掃完整條路線
-    _SEARCH_WINDOW = 200
+    # cursor 每幀最多往前推進的弧長（m）。18 km/h @ 40 fps 每幀只前進
+    # 0.125 m，5 m 已經是 40 倍的餘裕；上限存在的理由是**路線可能自我交叉**
+    # —— 繞一圈回到同一個地方、或同一個路口進出兩次，若不設限就會挑到後半段
+    # 那個更近的點，cursor 一次跳過去，車子跟著抄近路切過去。
+    # （立體交叉不受影響：`carla.Location.distance` 是 3D 的，高度差就分得開。）
+    _MAX_ADVANCE_M = 5.0
+    #: 距離連續變大幾個點就停止搜尋 —— 取第一個局部極小，而不是視窗內的全域
+    #: 極小。點距 0.5 m、每幀只走 0.125 m，距離變化是平滑的，不必怕雜訊誤停
+    _RISE_TO_STOP = 4
 
     def __init__(self, points: list) -> None:
         """`points` 是一串 carla.Location（車道中心線上的點）。
@@ -231,6 +241,9 @@ class Route:
         for a, b in zip(self._pts, self._pts[1:]):
             self._s.append(self._s[-1] + a.distance(b))
         self._cursor = 0
+        #: 最近一次 `advance()` 量到的橫向偏差（m）。HUD 直接讀這個 ——
+        #: 顯示程式碼不該自己再呼叫一次 `advance()`，那會推進 cursor
+        self.last_lateral = 0.0
 
     def __len__(self) -> int:
         return len(self._pts)
@@ -255,12 +268,20 @@ class Route:
         """
         best_i = self._cursor
         best_d = self._pts[best_i].distance(loc)
-        for i in range(self._cursor + 1,
-                       min(self._cursor + self._SEARCH_WINDOW, len(self._pts))):
+        limit_s = self._s[self._cursor] + self._MAX_ADVANCE_M
+        rising  = 0
+        i = self._cursor + 1
+        while i < len(self._pts) and self._s[i] <= limit_s:
             d = self._pts[i].distance(loc)
             if d < best_d:
-                best_i, best_d = i, d
-        self._cursor = best_i
+                best_i, best_d, rising = i, d, 0
+            else:
+                rising += 1
+                if rising >= self._RISE_TO_STOP:
+                    break
+            i += 1
+        self._cursor       = best_i
+        self.last_lateral  = best_d
         return best_d
 
     def lookahead_point(
@@ -1056,6 +1077,14 @@ def main() -> None:
                     args.lookahead_m, route)
                 warmup_counter += 1
                 if warmup_counter >= args.warmup_frames:
+                    # ALIGNING 是 TM 在開，它可能把車帶到隔壁車道；--route-file
+                    # 模式尤其明顯（生成點與路線是選好的，TM 卻自己走一段）。
+                    # 橫向偏差超過半個車道就代表接下來整批影像拍的不是路線上
+                    # 那條車道 —— 這種錯只會在事後對 GT 時才發現，先喊出來
+                    if route is not None and route.last_lateral > _LATERAL_WARN_M:
+                        print(f"[警告] 開始採集時離路線 {route.last_lateral:.2f} m"
+                              f"（>{_LATERAL_WARN_M} m，約半個車道）—— 車可能在隔壁"
+                              f"車道上。建議按 q 中止，把起點移到路口前後的直路段重來")
                     state = State.COLLECTING
                     print(f"[{state}] 開始存檔！按 'q' 停止")
 
@@ -1109,7 +1138,7 @@ def main() -> None:
                 # 持續變大就代表 pure-pursuit 沒跟上（不是路口選錯了）
                 cv2.putText(display,
                             f"Route: {route.remaining_m():.0f} m left  "
-                            f"Lateral: {route.advance(cur_location) * 100:.0f} cm",
+                            f"Lateral: {route.last_lateral * 100:.0f} cm",
                             (10, 158),    font, 0.8, (255, 200, 120), 2, cv2.LINE_AA)
             if profile_ms:
                 cv2.putText(display,
