@@ -1,31 +1,31 @@
 # mono3D-two-plane-geo
 
-Monocular road pitch angle estimation using two-plane geometry. The pipeline processes single-camera images through five sequential stages to estimate the road's pitch angle in degrees, using only a pretrained semantic segmentation model and classical geometry — no depth sensor required.
+Monocular road pitch estimation from a single camera. The pipeline runs five sequential stages over one image and returns a **continuous pitch(z) curve** — the road's pitch angle in degrees as a function of depth ahead of the camera — using only a pretrained semantic segmentation model and classical projective geometry. No depth sensor required.
+
+> **On the name:** the project started with an explicit near/far two-plane model. That model was replaced in WWH-9 by a continuous pitch(z) curve; there is no longer a knee or a pair of planes. The repository name is historical.
 
 ---
 
 ## Table of Contents
 
 - [How It Works](#how-it-works)
+- [Geometry Mode vs Legacy Mode](#geometry-mode-vs-legacy-mode)
 - [Project Structure](#project-structure)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Running the Project](#running-the-project)
   - [1. Single-Image Inference (with visualization)](#1-single-image-inference-with-visualization)
   - [2. Batch Inference on a Dataset](#2-batch-inference-on-a-dataset)
-  - [3. Evaluate: GT vs Predicted Pitch](#3-evaluate-gt-vs-predicted-pitch)
-  - [4. Error Analysis](#4-error-analysis)
-  - [5. CARLA Real-Time Test](#5-carla-real-time-test)
-- [Full Workflow (End-to-End Execution Order)](#full-workflow-end-to-end-execution-order)
+  - [3. CARLA Real-Time Test (currently broken)](#3-carla-real-time-test-currently-broken)
+- [Ground Truth](#ground-truth)
 - [Configuration Reference](#configuration-reference)
-- [Lane Segmentation Variants](#lane-segmentation-variants)
 - [Critical Conventions](#critical-conventions)
 
 ---
 
 ## How It Works
 
-The core entry point is `libs/inference/pipeline.py::infer_one()`, which chains five stages:
+The pipeline lives in `libs/inference/pipeline.py::infer_one()`, which chains the five stages:
 
 ```
 road_segmentation → line_segmentation → lane_segmentation → lane_fitting → pitch_estimation
@@ -34,18 +34,40 @@ road_segmentation → line_segmentation → lane_segmentation → lane_fitting �
 | Stage | File | What it does |
 |---|---|---|
 | road_segmentation | `libs/inference/road_segmentation.py` | PIDNet-L semantic segmentation → binary road mask (Cityscapes class 0) |
-| line_segmentation | `libs/inference/line_segmentation.py` | ELSED line detection with adaptive length threshold (perspective-aware) |
-| lane_segmentation | `libs/inference/lane_segmentation_up_hile.py` or `_down_hile.py` | Split lines into left/right, select innermost (or outermost for downhill) |
-| lane_fitting | `libs/inference/lane_fitting.py` | Piecewise linear fit per horizontal band, compute lane widths |
-| pitch_estimation | `libs/inference/pitch_estimation.py` | Inverse perspective → depth → 3D Y coords → Theil-Sen regression → pitch angle |
+| line_segmentation | `libs/inference/line_segmentation.py` | ELSED line detection with a perspective-aware length threshold (interpolated by segment mid-y) |
+| lane_segmentation | `libs/inference/lane_segmentation.py` | Near-to-far continuity tracking: seed the innermost lines at the bottom, track upward band by band with a local line model, re-seed past junctions |
+| lane_fitting | `libs/inference/lane_fitting.py` | Inner-chain extraction → sub-pixel edge refinement on the **unmasked** image → one continuous gap-bridged lane curve per side |
+| pitch_estimation | `libs/inference/pitch_estimation.py` | Sample lane widths from the two curves, inverse-perspective them to depth, then a continuous pitch(z) |
 
-**Pitch formula:**
+**Geometry:**
 
 ```
-depth    = f_x × w_real / width_pixel
-Y_3d     = -depth × (y_pixel - image_height/2) / f_y
-pitch    = arctan( TheilSen_slope(Y_3d ~ depth) )
+depth  z    = f_x × w_real / w_px          # w_px = inner-edge-to-inner-edge pixel width
+Y_3d        = -z × (y_pixel - cy) / f_y    # cy = image_height / 2
+pitch(z)    = arctan( slope of Y_3d over a local z-window )
 ```
+
+The default estimator is `windowed`: for each sampled depth it takes a Theil-Sen slope over a `±max(1 m, 0.15·z)` window, which makes the spatial resolution of the output explicit. `method: spline` switches to a global weighted `UnivariateSpline` with a Theil-Sen MAD prefilter.
+
+**Callers.** `utils/batch_inference_road_lane_segmentation.py` calls `infer_one()` directly. `utils/inference_road_lane_segmentation.py` deliberately inlines the same stages so it can draw each intermediate product — if you change `pipeline.py`, that second copy needs the same change.
+
+---
+
+## Geometry Mode vs Legacy Mode
+
+The tracker and the evidence guards behave differently depending on what camera parameters are supplied.
+
+**Geometry mode** — active when `f_x`, `f_y`, `w_real` **and** `camera_height` are all present. Under the flat-ground pinhole model every lateral threshold has an exact pixel form at row `y`, so association tolerance, seed window, slope gates and model memory are all *derived* rather than hand-tuned. This mode additionally runs three evidence guards:
+
+| Guard | Where | What it rejects |
+|---|---|---|
+| Paint segment gate | `paint_evidence.filter_paint_segments`, before tracking | ELSED segments that are not a bright ridge of bounded width — shadow boundaries, kerbs. The tracker then re-seeds on the true painted line |
+| Evidence-break truncation | `paint_evidence.truncate_at_evidence_break`, after refinement | The tail of a chain once the photometric "is this paint?" test fails for a sustained run — this is what crest occlusion looks like |
+| Depth-continuity truncation | `lane_fitting.truncate_at_depth_jump` | A jump in paired-row depth that exceeds both a continuity gate and 1.5× the local-plane extrapolation. Real paint beyond a crest is a *disconnected* section and must never be joined to the near chain |
+
+Their thresholds are module constants with the derivations in the docstrings, not config values.
+
+**Legacy mode** — when any of those four parameters is missing. Falls back to the hand-tuned `min_slope` / `lane_band_tolerance` and skips all three guards. Behaviour is unchanged from before the guards existed.
 
 ---
 
@@ -55,37 +77,44 @@ pitch    = arctan( TheilSen_slope(Y_3d ~ depth) )
 mono3D-two-plane-geo/
 ├── config/
 │   ├── inference_road_lane_segmentation.yaml   # Main config for all inference
-│   └── convert_metadata_to_gt.yaml             # Config for GT conversion
+│   └── train_road_segmentation.yaml            # Config for the (legacy) Resnet101 training path
 ├── libs/
 │   ├── inference/
-│   │   ├── pipeline.py                         # Core pipeline: infer_one()
+│   │   ├── pipeline.py                         # infer_one(): the five stages
+│   │   ├── geometry.py                         # CameraGeometry: the pinhole model shared by the stages
 │   │   ├── road_segmentation.py                # PIDNet loader + masking
 │   │   ├── line_segmentation.py                # ELSED line detection (perspective-aware)
-│   │   ├── lane_segmentation_up_hile.py        # Lane split for uphill roads
-│   │   ├── lane_segmentation_down_hile.py      # Lane split for downhill roads
-│   │   ├── lane_fitting.py                     # Piecewise linear fit + width sampling
-│   │   └── pitch_estimation.py                 # Geometric pitch estimation
+│   │   ├── lane_segmentation.py                # Near-to-far continuity tracking
+│   │   ├── paint_evidence.py                   # Photometric "is this actually paint?" guards
+│   │   ├── lane_fitting.py                     # Inner chain → sub-pixel refine → lane curves
+│   │   └── pitch_estimation.py                 # Width sampling → depth → continuous pitch(z)
+│   ├── road_profile_gt.py                      # Measured road-profile ground truth
 │   └── visualization/
-│       └── lane_visualization.py               # Draw masks, lanes, fits
+│       ├── lane_visualization.py               # Masks, segments, lanes, curves, per-step dumps
+│       ├── pitch_visualization.py              # Per-frame pitch / Y_3d profile plots
+│       ├── profile_mae_visualization.py        # Per-frame MAE plot (batch)
+│       └── route_profile_visualization.py      # Whole-route terrain profile plot (batch)
 ├── carla_module/
-│   ├── realtime_test.py                        # CARLA real-time inference loop
+│   ├── get_carlaDataset.py                     # Dataset collector (images + measurements + road profile)
+│   ├── pick_route.py                           # Top-down route picking tool
+│   ├── project_lane_gt.py                      # Project lane GT into the image
+│   ├── verify_carla_geometry.py                # Calibration checks against the simulator
+│   ├── realtime_test.py                        # Real-time inference loop — CURRENTLY BROKEN, see below
 │   ├── carla_road_segmentation.py              # PIDNet adapter for PIL input
 │   └── carla_visualization.py                  # CARLA display rendering
 ├── utils/
-│   ├── env_setup.py                            # Must be called before C extension imports
-│   ├── inference_road_lane_segmentation.py     # Single-image inference + save visualizations
-│   ├── batch_inference_road_lane_segmentation.py  # Batch inference → CSV output
-│   ├── convert_metadata_to_gt.py               # Convert raw CARLA metadata to GT labels
-│   ├── plot_frameId_and_pitch.py               # Plot GT vs predicted pitch
-│   └── analyze_error/
-│       ├── find_top_error.py                   # Export top-K highest error frames
-│       └── analyze_interval_error.py           # Compute MAE per frame interval
+│   ├── env_setup.py                            # Must be called before any C extension import
+│   ├── inference_road_lane_segmentation.py     # Single-image inference + all visualizations
+│   └── batch_inference_road_lane_segmentation.py  # Batch inference → CSV + plots
+├── debug/                                      # Diagnostic and prototype scripts (not part of the pipeline)
 ├── scripts/
-│   └── setup_elsed.py                          # Clone + patch ELSED C++ extension
+│   └── setup_elsed.py                          # Clone + patch the ELSED C++ extension
+├── docs/papers/                                # Reference papers and design drawios
 ├── pidnet_models/                              # PIDNet model definitions
 ├── pidnet_pretrained_model/                    # Pretrained weights (not tracked in git)
 │   └── PIDNet_L_Cityscapes_test.pt
 ├── outputs/                                    # Inference results, CSVs, plots
+├── main.py                                     # Thin wrapper around single-image inference
 ├── .env.example                                # Template for machine-specific paths
 └── pyproject.toml                              # Dependencies (managed by uv)
 ```
@@ -102,7 +131,7 @@ mono3D-two-plane-geo/
   - **Linux**: `gcc` / `g++`
 - **Windows only**: A system-installed OpenCV SDK (not the PyPI wheel) — path set via `.env`
 
-For CARLA real-time testing, additionally:
+For CARLA data collection, additionally:
 - A running CARLA simulator server (tested with 0.9.16)
 - The matching CARLA Python `.whl` installed manually
 
@@ -123,7 +152,7 @@ Edit `.env` with your machine-specific paths. On macOS/Linux, you can leave the 
 OPENCV_BIN_PATH=
 OPENCV_DIR=
 
-# Path to CARLA .whl (required only for CARLA real-time test)
+# Path to CARLA .whl (required only for CARLA work)
 CARLA_WHL_PATH=
 ```
 
@@ -151,9 +180,9 @@ Download `PIDNet_L_Cityscapes_test.pt` and place it at:
 pidnet_pretrained_model/PIDNet_L_Cityscapes_test.pt
 ```
 
-**Step 5 — (Optional) Install CARLA Python package**
+**Step 5 — (Optional) Install the CARLA Python package**
 
-Only needed for real-time CARLA testing. Install the `.whl` that matches your CARLA server version:
+Only needed for data collection or real-time testing. Install the `.whl` that matches your CARLA server version:
 
 ```bash
 uv pip install $CARLA_WHL_PATH
@@ -163,236 +192,173 @@ uv pip install $CARLA_WHL_PATH
 
 ## Running the Project
 
-> **Important:** All commands must be run from the **project root directory**. The config file and relative paths in the code depend on this.
+> **Important:** All commands must be run from the **project root directory**. The config file and the relative paths in the code depend on this.
 
 ### 1. Single-Image Inference (with visualization)
 
-Runs the full 5-stage pipeline on one image and saves intermediate visualizations to `outputs/`.
+Runs the five stages on one image and saves every intermediate product to `outputs/`.
 
 ```bash
 python -m utils.inference_road_lane_segmentation
+# python main.py is a thin wrapper around exactly this
 ```
 
 Set the target image in `config/inference_road_lane_segmentation.yaml`:
 
 ```yaml
 input:
-  image_path: "inference_datasets/solid_line/up_hile/images/000201.png"
+  image_path: "inference_datasets/<dataset>/images/000500.png"
 ```
 
-Output files saved to `outputs/`:
+Output files (base name comes from `visualization.save_path`):
 
 | File | Content |
 |---|---|
-| `result_overlay.png` | Road mask overlaid on image |
+| `result_overlay.png` | Road mask overlaid on the image |
 | `result_line_segments.png` | All detected ELSED line segments |
-| `result_lanes.png` | Inner left/right lane lines |
-| `result_lane_fits.png` | Piecewise fits + sampled width points |
+| `result_lanes_seg.png` | The tracked inner left/right lane segments |
+| `result_lane_fits.png` | The two continuous lane curves |
+| `result_pitch_profile.png` | Predicted pitch(z) against GT |
+| `result_y3d_profile.png` | Predicted road height Y_3d(z) against GT |
+| `outputs/lane_fit_step/` | Per-step dump of the lane-fitting stage |
+| `outputs/pitch_est_step/` | Per-step dump of the pitch-estimation stage |
 
-Inference timing per stage is printed to stdout.
+Per-stage timing, the GT source, and the frame's pitch MAE are printed to stdout. GT is read from the image's own dataset, so no separate GT file has to be prepared.
 
 ---
 
 ### 2. Batch Inference on a Dataset
 
-Runs inference on every frame listed in a CSV and writes `pred_deg` back to the same CSV.
-
-**Before running**, you need a GT CSV with at least a `frame_id` column. See [Full Workflow](#full-workflow-end-to-end-execution-order) below for how to generate it.
-
-Set paths in `config/inference_road_lane_segmentation.yaml`:
-
-```yaml
-input:
-  image_batch_path: "inference_datasets/solid_line/up_hile/images"
-csv_io:
-  input_dir: "outputs/metadata_gt.csv"
-  output_dir: "outputs/metadata_gt.csv"   # overwrites in-place
-```
+Runs inference on every frame in a dataset's `measurements.csv` and writes the results back out.
 
 ```bash
 python -m utils.batch_inference_road_lane_segmentation
 ```
 
-Frames that fail (e.g., no lane detected) are skipped and logged. A summary of skip count is printed at the end.
+Set the paths in `config/inference_road_lane_segmentation.yaml`:
+
+```yaml
+input:
+  image_batch_path: "inference_datasets/<dataset>/images"
+csv_io:
+  measurements_csv: "inference_datasets/<dataset>/measurements.csv"
+  output_dir: "outputs/measurements.csv"
+  problem_csv: "outputs/problem.csv"
+  problem_mae_threshold: 2.0
+```
+
+Produces:
+
+| Output | Content |
+|---|---|
+| `csv_io.output_dir` | The input CSV plus `z_visible_min`, `z_visible_max`, `profile_mae` per frame |
+| `outputs/problem.csv` | Frames with `profile_mae` above `problem_mae_threshold`, worst first |
+| `outputs/profile_mae_<dataset>.png` | Per-frame MAE over the route |
+| `outputs/route_profile_<dataset>.png` | Whole-route terrain profile (analytic vs mesh height, their difference, per-frame MAE aligned to distance). Only when the dataset has a `road_profile.csv` |
+
+The plot filenames carry the dataset name so that running several datasets back to back does not overwrite them; the CSV paths still follow the config.
+
+Frames that produce no output are skipped and their ids printed. **A skipped frame is not necessarily a bug** — the method needs two inner lane edges, so intersections and unmarked crests legitimately give nothing, and the paint guards will abstain rather than measure a kerb.
 
 ---
 
-### 3. Evaluate: GT vs Predicted Pitch
-
-Plots `gt_pitch_deg` and `pred_deg` against `frame_id` from the CSV produced in step 2.
-
-```bash
-python main.py
-```
-
-Output: `outputs/pitch_plot.png`
-
----
-
-### 4. Error Analysis
-
-These utilities read from the output CSV of batch inference.
-
-**Find the top-10 highest-error frames:**
-
-```bash
-python -m utils.analyze_error.find_top_error
-```
-
-Output: `outputs/top_errors.csv`
-
-**Compute MAE by frame interval:**
-
-```bash
-python -m utils.analyze_error.analyze_interval_error
-```
-
-Prints MAE for the hard-coded frame intervals (196–410 and 410–500). Edit the script to change intervals.
-
----
-
-### 5. CARLA Real-Time Test
-
-Requires a running CARLA server. Spawns a vehicle, attaches an RGB camera, and runs the full inference pipeline on each frame in real time, overlaying estimated and ground-truth pitch.
+### 3. CARLA Real-Time Test (currently broken)
 
 ```bash
 python carla_module/realtime_test.py [--host HOST] [--port PORT] [--map MAP] [--timeout SEC]
 ```
 
-| Argument | Default | Description |
-|---|---|---|
-| `--host` | `127.0.0.1` | CARLA server address |
-| `--port` | `2000` | CARLA server port |
-| `--map` | `Town03` | CARLA map name |
-| `--timeout` | `20.0` | Connection timeout (seconds) |
+> ⚠ **This path does not currently run.** `realtime_test.py` and `carla_visualization.py` still import `collect_points_from_segments`, `piecewise_linear_fit`, `compute_lane_widths` and `fit_two_plane_model`, all of which were removed in WWH-7 / WWH-9. Reviving it means migrating to `lane_curve` / `sample_widths_from_curves` / `estimate_pitch_from_curves` and adding the three evidence guards. Two further notes for whoever does it: `realtime_test.py` mounts its camera at 2.4 m and overrides `camera_height`, and it overrides `f_y = f_x` because the CARLA camera has square pixels; and its `w_real` means inner-edge to inner-edge, same as everywhere else.
 
-Press **`q`** to quit. On exit, the script destroys all spawned CARLA actors automatically.
-
-> **Note:** The CARLA camera uses square pixels (FOV=90°, 1024×512), so `f_y` is overridden to equal `f_x` inside `load_config()` regardless of what the YAML says.
+Data **collection** from CARLA (`carla_module/get_carlaDataset.py`, `pick_route.py`) is unaffected and works.
 
 ---
 
-## Full Workflow (End-to-End Execution Order)
+## Ground Truth
 
-This is the complete pipeline for collecting data from CARLA and evaluating pitch estimation accuracy.
+GT is not a pipeline stage — it is the reference the runners score against, and it lives in its own `ground_truth` config section.
 
-```
-Step 0: Setup (one-time)
-─────────────────────────────────────────────────────
-cp .env.example .env                              # fill in machine-specific paths
-python scripts/setup_elsed.py                     # patch ELSED C++ source
-uv sync                                           # install deps + compile pyelsed
-uv pip install $CARLA_WHL_PATH                    # (if using CARLA)
+A collected dataset carries two files: `measurements.csv` (per frame: the camera transform, vehicle distance, body pitch) and `road_profile.csv` (the road surface ahead, in world coordinates). `libs/road_profile_gt.py` projects the profile into the camera frame with `v = P_world − cam_world`, `z_gt = v·forward`, `h_gt = v·up` — no offset constant, no arc-length conversion, and it never goes through the vehicle's attitude.
 
-Step 1: Collect raw metadata from CARLA
-─────────────────────────────────────────────────────
-# Run your CARLA data collection script to produce:
-#   inference_datasets/solid_line/up_hile/images/   ← frame images (000001.png, ...)
-#   inference_datasets/solid_line/up_hile/metadata_filtered.csv
-#                                                  ← columns: frame_id, pitch (vehicle transform pitch)
+`road_profile.csv` has two height columns and `ground_truth.height_source` picks between them:
 
-Step 2: Convert raw metadata to ground truth
-─────────────────────────────────────────────────────
-# Edit config/convert_metadata_to_gt.yaml:
-#   slope_deg: 12.25          ← true road slope in degrees
-#   input_dir: "inference_datasets/solid_line/up_hile/metadata_filtered.csv"
-#   output_dir: "outputs/metadata_gt.csv"
-python -m utils.convert_metadata_to_gt
-# Produces outputs/metadata_gt.csv with column gt_pitch_deg = slope_deg - pitch
+| Value | Column | Meaning |
+|---|---|---|
+| `auto` (default) | `z_mesh` if present, else `z` | Falls back for pre-WWH-14 datasets |
+| `analytic` | `z` | The OpenDRIVE analytic centreline: smooth, without the implemented surface detail |
+| `mesh` | `z_mesh` | A downward ray-cast onto the road mesh at collection time |
 
-Step 3: Run batch inference
-─────────────────────────────────────────────────────
-# Edit config/inference_road_lane_segmentation.yaml:
-#   image_batch_path: "inference_datasets/solid_line/up_hile/images"
-#   csv_io.input_dir / output_dir: "outputs/metadata_gt.csv"
-python -m utils.batch_inference_road_lane_segmentation
-# Adds pred_deg column to outputs/metadata_gt.csv
+`mesh` is the better reference: the collector's road surface deviates from the analytic centreline in a few localised sections and the camera demonstrably sees those deviations. Asking for `mesh` on a dataset that lacks the column raises rather than silently falling back. The runners print `GT source:` so you can see which one was used.
 
-Step 4: Plot results
-─────────────────────────────────────────────────────
-python main.py
-# Saves outputs/pitch_plot.png
+> ⚠ Do not re-litigate the analytic/mesh choice with **absolute-height** MAE — it is dominated by a per-frame constant offset. The evidence is written up in the `libs/road_profile_gt.py` module docstring and the config comments.
 
-Step 5: Analyze errors (optional)
-─────────────────────────────────────────────────────
-python -m utils.analyze_error.find_top_error
-python -m utils.analyze_error.analyze_interval_error
-```
+Datasets with no `road_profile.csv` fall back to a legacy GT that reconstructs the road ahead from the vehicle's own later body pitch.
 
 ---
 
 ## Configuration Reference
 
-All inference parameters live in `config/inference_road_lane_segmentation.yaml`.
+All inference parameters live in `config/inference_road_lane_segmentation.yaml`. The sections map 1:1 onto the pipeline stages, plus `ground_truth`, `visualization` and `csv_io`. The file itself carries long comments recording where each calibrated value came from; this is only a map.
 
 ```yaml
 model:
-  device: "cpu"                 # "cpu" or "cuda"
-  model_name: "pidnet_l"        # PIDNet variant
+  device: "cuda"                # "cpu" or "cuda"
+  model_name: "pidnet_l"
   weight_path: "pidnet_pretrained_model/PIDNet_L_Cityscapes_test.pt"
 
 input:
   image_path: "..."             # single-image inference target
   image_batch_path: "..."       # directory for batch inference
-  resize_size: [512, 1024]      # [height, width] — PIL will swap internally
+  resize_size: [512, 1024]      # [height, width] — PIL swaps internally
+
+road_segmentation:              # no parameters: PIDNet-L uses argmax, and no
+                                # morphological cleanup is applied to the mask
 
 line_segmentation:
-  min_segment_length_near: 65   # min segment length (px) at bottom of image
-  min_segment_length_far: 0     # min segment length (px) at top of image
-                                # threshold is linearly interpolated by mid-y
+  min_segment_length_near: 65   # min segment length (px) at the bottom of the image
+  min_segment_length_far: 0     # ... and at the top; interpolated linearly by mid-y
 
 lane_segmentation:
-  min_slope: 0.3                # discard segments with |slope| < this
-  lane_band_tolerance: 10       # max x_at_bottom deviation (px) to merge into same lane
+  min_slope: 0.3                # LEGACY ONLY — ignored once camera_height enables geometry mode
+  lane_band_tolerance: 10       # LEGACY ONLY
+  track_bands: 16               # continuity-tracking band count (clamped to >= 16 internally)
 
 lane_fitting:
-  num_samples: 20               # fallback width-sample count (legacy / no samples_per_meter)
-  samples_per_meter: 6          # width-sample density per meter of depth (pitch_estimation)
+  num_samples: 80               # width-sample fallback (legacy y-uniform, or when samples_per_meter is unset)
+  samples_per_meter: 6          # geometry mode: z-uniform width-sample density, per metre of visible depth
 
 pitch_estimation:
   f_x: 512                      # horizontal focal length (px, after resize)
   f_y: 455                      # vertical focal length (px, after resize)
-  w_real: 3.216                 # inner-edge-to-inner-edge lane width (m); NOT carla's lane_width (3.5, centre-to-centre)
-  camera_height: 1.08           # camera mount height above the road (m)
-  camera_forward_offset: 1.5    # camera mount offset ahead of the vehicle origin (m); GT distance alignment
+  w_real: 3.25                  # inner-edge-to-inner-edge lane width (m) — see the warning below
+  camera_height: 1.08           # camera mount height above the road (m); also enables geometry mode
+  camera_forward_offset: 1.5    # camera mount offset ahead of the vehicle origin (m), for GT distance alignment
+  method: windowed              # "windowed" (default) or "spline"
+
+ground_truth:
+  height_source: "auto"         # "auto" | "analytic" | "mesh"
 
 visualization:
   alpha: 0.4
   save_path: "outputs/result.png"
 
 csv_io:
-  input_dir: "outputs/metadata_gt.csv"
-  output_dir: "outputs/metadata_gt.csv"
+  measurements_csv: "inference_datasets/<dataset>/measurements.csv"
+  output_dir: "outputs/measurements.csv"
+  problem_csv: "outputs/problem.csv"
+  problem_mae_threshold: 2.0
 ```
 
-GT conversion config (`config/convert_metadata_to_gt.yaml`):
-
-```yaml
-slope_deg: 12.25                # true road slope used to compute gt_pitch_deg
-io:
-  input_dir: "inference_datasets/solid_line/up_hile/metadata_filtered.csv"
-  output_dir: "outputs/metadata_gt.csv"
-```
-
----
-
-## Lane Segmentation Variants
-
-Two implementations exist for different road conditions. Switch by changing the import in `libs/inference/pipeline.py`:
-
-| Variant | File | Use case | Selection strategy |
-|---|---|---|---|
-| `up_hile` | `lane_segmentation_up_hile.py` | Uphill / flat roads | Picks the **innermost** lane lines; uses `x_at_bottom` to rank |
-| `down_hile` | `lane_segmentation_down_hile.py` | Downhill roads | Picks the **outermost** lane lines; adds adaptive ROI filtering based on `mid_y` to handle perspective distortion |
-
-`up_hile` is the default used in `pipeline.py` and `utils/inference_road_lane_segmentation.py`.
+> ⚠ **`w_real = 3.25` is specific to this road's marking layout** — double yellow on the left, single white on the right, on a 3.5 m lane. Because `w_real` is inner-edge to inner-edge, each side is inset from the boundary-centre width by a different amount (left 0.1875, right 0.0625, total 0.25). On the same 3.5 m lane: single+single → 3.375, double+single → **3.25**, double+double → 3.125. Re-derive it per road; do not carry 3.25 to another map or another lane. And determine it from height/geometry, never by minimising MAE — MAE trades the z scale against pitch error and its optimum is systematically pulled low.
 
 ---
 
 ## Critical Conventions
 
 - **`setup_env()` must be the very first call** in any entry-point script, before any `import cv2`, `import pyelsed`, or `import carla`. It loads `.env` and registers OpenCV DLL paths on Windows. See `utils/env_setup.py`.
-- **Image format**: The pipeline expects **RGB** throughout. Only convert to BGR with `cv2.cvtColor` immediately before `cv2.imwrite()`.
+- **Image format**: the pipeline expects **RGB** throughout. Only convert to BGR with `cv2.cvtColor` immediately before `cv2.imwrite()`.
 - **Coordinate system**: OpenCV convention — origin at top-left, y increases downward. Left lane lines have **negative** slope, right lane lines have **positive** slope.
 - **`resize_size` is `[height, width]`** in the YAML, but PIL's `image.resize()` expects `(width, height)`. The swap is handled inside `predict_road()` — do not swap it again.
-- **CARLA overrides `f_y = f_x`** (square pixels) inside `carla_module/realtime_test.py::load_config()`. The YAML value for `f_y` is ignored in CARLA mode.
+- **`w_real` is inner-edge to inner-edge**, not CARLA's `waypoint.lane_width` (which is boundary-centre to boundary-centre).
+- **CARLA overrides `f_y = f_x`** (square pixels) and `camera_height = 2.4` inside `carla_module/realtime_test.py::load_config()`. The YAML values are ignored in that mode.
+- **`pipeline.py` has a second copy**: `utils/inference_road_lane_segmentation.py` inlines the same stages to draw intermediates. Changes to the pipeline must be made in both.

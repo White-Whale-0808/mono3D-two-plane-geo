@@ -73,15 +73,17 @@ repo 內論文背書（`Lin_&_Tsai_IEEETPAMI_1991.pdf`、`AI-Enhanced_Mono-View_
       → 見[第 3 區塊](#carla-資料採集與標定)的未解項 4
 - [ ] 待辦：對「有依據」的項目，在註解補上明確 ref（規範名稱 / repo 論文路徑）
 
-### 2. 修失效的文件參照（成本最低）
-模組 docstring **L7、L11** 仍指向：
-- `docs/lane_segmentation_issues.md`（問題 4）
-- `docs/lane_segmentation_parameter_problem.md`
+### 2. `docs/diagrams/` 沒有進版控
+（原本的「修失效的文件參照」已完成：docstring 改指向版控裡真的有的
+`docs/papers/lane_segmentation_design_logic.drawio`。）
 
-但 `docs/` 底下只有 `papers/` 和 `diagrams/`，這兩個檔仍不存在（**2026-08-27 覆核仍失效**）。
+`docs/diagrams/` 底下有四份流程圖（`lane_segmentation_flow`、`lane_fitting_flow`、
+`pitch_estimation_flow`、`workflow`，2026-07-17），**未追蹤也沒被 gitignore**。
+它們比 `docs/papers/` 裡那幾份同名 drawio 新，但 clone 下來的人看不到 ——
+註解指過去就會重演「參照失效」。
 
-- [ ] 補回文件，或更新註解指向 `docs/diagrams/lane_segmentation_flow.drawio`
-      / `docs/papers/lane_segmentation_design_logic.drawio`
+- [ ] 決定：進版控（並讓 `docs/papers/` 裡的設計 drawio 搬過去，那裡應該只放論文），
+      或確認是本機草稿、加進 `.gitignore`
 
 ## 中優先
 
@@ -128,8 +130,7 @@ WWH-9 與 WWH-15 各新增一批常數。它們的註解**普遍比 lane_segment
 
 ### 4. 殘留 TODO 與死參數
 - [ ] **L87** TODO：`replace 1.0 multiplier with p95 lateral offset from CARLA GT` 尚未完成
-- [ ] `roi_far`（**L372**）仍標明 unused、僅為簽名相容保留 → 評估清掉
-- [ ] `roi_near`（L371）/ `min_slope`（L368）/ `lane_band_tolerance`（L370）仍僅
+- [ ] `roi_near`（L370）/ `min_slope`（L367）/ `lane_band_tolerance`（L369）仍僅
       legacy 路徑使用 → 幾何模式啟用後是雜訊，考慮集中到 legacy 分支或清理
       （注意 `min_slope` 另被 `_FRAG_MAX_STEP_PX` 的推導引用，見 3b）
 
@@ -140,11 +141,10 @@ WWH-9 與 WWH-15 各新增一批常數。它們的註解**普遍比 lane_segment
 ## 高優先
 
 ### A. `pipeline.py` 與文件的一致性
-> WWH-15（2026-08-27）已完成本節原本的兩項：batch runner 改走 `infer_one`、
-> `infer_one` 加了 `method` 參數。以下是剩下的。
+> 已完成：batch runner 改走 `infer_one`、`infer_one` 加了 `method` 參數
+> （WWH-15）；docstring 的 "continuous spline pitch(z)" 已改正（2026-08-27）。
+> 以下是剩下的。
 
-- [ ] **`pipeline.py` 的 docstring 又過期了**：L9 和 L91 都寫
-      "continuous spline pitch(z)"，但 WWH-9 之後預設估測器是 **windowed**
 - [ ] **單張 runner 仍攤開 pipeline**：`utils/inference_road_lane_segmentation.py`
       要畫中間產物，所以 WWH-15 選擇「保持攤開但照 pipeline 原樣插入三道閘門」。
       → 要消除這份拷貝，得讓 `infer_one` 有 debug 模式吐中間產物。
@@ -154,12 +154,6 @@ WWH-9 與 WWH-15 各新增一批常數。它們的註解**普遍比 lane_segment
       （純命名決策，沒有技術債後果，不急）
 
 ## 中優先
-
-### C. 清掉已死的註解區塊
-- [ ] `libs/inference/road_segmentation.py` **L56–L75**：整段被註解掉的舊
-      Resnet101 推論程式碼，已不使用，可刪。另 **L84–L90** 的
-      erosion / GaussianBlur / morphology 死碼（L79–82 已有說明為何放棄，
-      可保留說明刪死碼）
 
 ### D. 沒有任何單元測試
 **2026-08-27 覆核：repo 內仍無自己的 test。**（`carla_module/realtime_test.py`
@@ -177,12 +171,17 @@ WWH-8 的等價性測試、WWH-15 的煙霧測試都是臨時腳本，沒有進�
 ## 低優先
 
 ### E. config 與文件一致性
-- [ ] `config` 內仍留 3 個被註解的舊參數：`threshold`(L15)、
-      `mask_erosion_kernel`(L16)、`roi`(L23) → 確認不再需要後清理
-      （`ransac_residual_threshold` 已不存在；L5 的替代 `weight_path` 是刻意保留）
-- [ ] README.md 內容是否同步到目前 pipeline，待對照一次。已知 **L28** 說
-      `infer_one` 是 "core entry point" —— batch runner 現在確實走它，但單張
-      runner 仍自己攤開，說法只對一半
+（已完成：3 個被註解的舊 config 參數已清；README.md 已依 2026-08-27 的程式碼
+重寫一次 —— 它原本還在寫已刪除的 `lane_segmentation_up_hile.py` / `_down_hile.py`、
+不存在的 `utils/convert_metadata_to_gt.py` / `plot_frameId_and_pitch.py` /
+`analyze_error/`、舊的 piecewise 車道擬合與 3.216 的 `w_real`。）
+
+- [ ] `config/convert_metadata_to_gt.yaml` 仍在版控，但它的腳本
+      `utils/convert_metadata_to_gt.py` 已不存在（GT 自 WWH-14 起改由
+      `road_profile.csv` 提供）→ 確認後刪
+- [ ] `config/train_road_segmentation.yaml` + `libs/engine/` + `libs/model/resnet101.py`
+      + `libs/dataset/` 是舊 Resnet101 訓練路徑，已不在任何推論流程上
+      → 決定留作歷史還是清掉（README 目前只用一行帶過）
 
 ### B2. windowed pitch 的 95 ms 延遲（隨 CARLA 一起解凍）
 - [ ] `estimate_pitch_windowed` 每幀呼叫 200 次 `theilslopes`，pitch 階段

@@ -30,7 +30,7 @@ python -m utils.batch_inference_road_lane_segmentation
 # CARLA real-time test (requires running CARLA server)
 python carla_module/realtime_test.py [--host HOST] [--port PORT] [--map MAP]
 
-# Plot GT vs predicted pitch
+# Same as the single-image command above — main.py is a thin wrapper around it
 python main.py
 ```
 
