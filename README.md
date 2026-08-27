@@ -9,7 +9,7 @@ Monocular road pitch estimation from a single camera. The pipeline runs five seq
 ## Table of Contents
 
 - [How It Works](#how-it-works)
-- [Geometry Mode vs Legacy Mode](#geometry-mode-vs-legacy-mode)
+- [Calibration and the Evidence Guards](#calibration-and-the-evidence-guards)
 - [Project Structure](#project-structure)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
@@ -54,11 +54,9 @@ The default estimator is `windowed`: for each sampled depth it takes a Theil-Sen
 
 ---
 
-## Geometry Mode vs Legacy Mode
+## Calibration and the Evidence Guards
 
-The tracker and the evidence guards behave differently depending on what camera parameters are supplied.
-
-**Geometry mode** — active when `f_x`, `f_y`, `w_real` **and** `camera_height` are all present. Under the flat-ground pinhole model every lateral threshold has an exact pixel form at row `y`, so association tolerance, seed window, slope gates and model memory are all *derived* rather than hand-tuned. This mode additionally runs three evidence guards:
+`f_x`, `f_y`, `w_real` and `camera_height` are **required**. Under the flat-ground pinhole model every lateral threshold has an exact pixel form at row `y`, so association tolerance, seed window, slope gates and model memory are all *derived* rather than hand-tuned. Three evidence guards ride on the same projection:
 
 | Guard | Where | What it rejects |
 |---|---|---|
@@ -68,7 +66,7 @@ The tracker and the evidence guards behave differently depending on what camera 
 
 Their thresholds are module constants with the derivations in the docstrings, not config values.
 
-**Legacy mode** — when any of those four parameters is missing. Falls back to the hand-tuned `min_slope` / `lane_band_tolerance` and skips all three guards. Behaviour is unchanged from before the guards existed.
+> A hand-tuned fallback for un-calibrated cameras (`min_slope` / `lane_band_tolerance` / `roi_near`) used to sit alongside this and was removed on 2026-08-27: every caller supplied the full calibration, so it was a second implementation that nothing ran and no test covered. Its thresholds were fitted to one dataset anyway, so a genuinely different camera would need them re-derived rather than reused — which is what the geometry path does on its own.
 
 ---
 
@@ -113,7 +111,7 @@ mono3D-two-plane-geo/
 │   ├── test_pitch_estimation.py                # Metric stage against known grades
 │   ├── test_paint_evidence.py                  # Paint guards' edge cases
 │   └── test_depth_jump.py                      # Depth-continuity guard's edge cases
-├── debug/                                      # Diagnostic and prototype scripts (not part of the pipeline)
+├── debug/                                      # Diagnostic and prototype scripts (gitignored, not part of the pipeline)
 ├── scripts/
 │   └── setup_elsed.py                          # Clone + patch the ELSED C++ extension
 ├── docs/papers/                                # Reference papers and design drawios
@@ -345,13 +343,11 @@ line_segmentation:
   min_segment_length_near: 65   # min segment length (px) at the bottom of the image
   min_segment_length_far: 0     # ... and at the top; interpolated linearly by mid-y
 
-lane_segmentation:
-  min_slope: 0.3                # LEGACY ONLY — ignored once camera_height enables geometry mode
-  lane_band_tolerance: 10       # LEGACY ONLY
+lane_segmentation:              # thresholds are derived from pitch_estimation's calibration
   track_bands: 16               # continuity-tracking band count (clamped to >= 16 internally)
 
 lane_fitting:
-  num_samples: 80               # width-sample fallback (legacy y-uniform, or when samples_per_meter is unset)
+  num_samples: 80               # width-sample fallback when samples_per_meter is unset
   samples_per_meter: 6          # geometry mode: z-uniform width-sample density, per metre of visible depth
 
 pitch_estimation:

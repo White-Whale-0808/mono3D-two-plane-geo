@@ -9,6 +9,8 @@
 > **2026-08-27**：WWH-15 結案後整理 —— 移出三個已完成項（下坡兩個失效模式、
 > `infer_one` 無呼叫者、`infer_one` 不能選估測器）、刪除一個判定不重要項
 > （`_track_side` 效能）、補上 WWH-15 新增的常數、全檔行號重新對照。
+> 同日又完成：§2 失效文件參照、§C 死註解區塊（全 repo 掃過，沒有其他）、
+> §E config 舊參數 + README 重寫、§D 單元測試、以及**刪掉整條 legacy 分支**。
 
 三大區塊：
 1. [`lane_segmentation.py` 優化](#lane_segmentationpy-優化)
@@ -22,8 +24,9 @@
 ## 高優先
 
 ### 1. 把具名常數搬進 config（影響準度，跨相機高度可調）
-模組頂部 **L35–L49** 的常數命名清楚、有物理意義，但全部寫死、無法調整。
+模組頂部 **L40–L54** 的常數命名清楚、有物理意義，但全部寫死、無法調整。
 同一份 code 要跑 CARLA(相機 2.4m) 和 dataset(1.08m) 兩種高度，這些值卻不能隨場景變。
+（legacy 分支刪除後，這些是**唯一**還在控制追蹤器行為的可調量。）
 
 > ⚠ **2026-08-27 未決的設計爭議**：WWH-15 刻意把 `paint_evidence.py` 的門檻
 > **留在模組常數**，理由是「有物理推導的門檻不進 config，以免邀請使用者手調
@@ -52,7 +55,7 @@
 
 | 常數 | 形式來源 | scalar 本身 | 判定 | 可 ref |
 |---|---|---|---|---|
-| `_SEED_DELTA = 0.5` | 幾何 | 真推導：車可在自車道內任意橫向 → 內側標線 X∈(0±0.5)·w | **有依據（最壞界）** | 自身幾何；但保守，見 L87 TODO |
+| `_SEED_DELTA = 0.5` | 幾何 | 真推導：車可在自車道內任意橫向 → 內側標線 X∈(0±0.5)·w | **有依據（最壞界）** | 自身幾何；但保守，見 L85 TODO |
 | `_MAX_GRADE_DEG = 15.0` | 工程標準 | 15°(~27%) 是道路最大縱坡的保守上界 | **有依據（外部標準）** | 道路幾何設計規範（如 AASHTO 縱坡上限） |
 | `_SUPPORT_MIN_LEN_PX = 60.0` | 實測分佈 | 註解記了依據：電線桿/山坡 32–54 px，合法遠段 ≥77 px | **有依據（實測，樣本數未知）** | 註解 L47–49；建議補樣本數 |
 | `_TOL_PX_FLOOR = 3.0` | 感測器噪聲 | 3px 安全下限，可對應 ELSED 端點抖動 | **半 magic（經驗有依據）** | `docs/papers/ELSED_*.pdf`（定位精度） |
@@ -90,17 +93,20 @@ repo 內論文背書（`Lin_&_Tsai_IEEETPAMI_1991.pdf`、`AI-Enhanced_Mono-View_
 ### 3. 抽出仍硬寫、且連名字都沒有的數字
 這些比第 1 點更值得抽出，因為完全沒有說明（皆為 magic number）。行號已於 2026-08-27 更新：
 
-- [ ] **L81** legacy gate：`0.5 * min_slope * (mid_y / img_height)` — 0.5 無說明
-      （僅 `geom is None` 的 legacy 分支會走到）
-- [ ] **L112 / L127** `_fit_x_of_y`：`last_n=8`、最少 `>= 4` 點
-- [ ] **L245–246** legacy `assoc_window`：`2.0 + 1.5*missed`、`0.18 * center_x`
-- [ ] **L314**：`missed > max(4, track_bands // 3)`
-- [ ] **L325**：`missed >= 2`；同段 `track_points[-2:]`
-- [ ] **L419**：`track_bands = max(int(track_bands), 16)`
+（legacy 分支刪除後，原本的 L81 斜率閘門 `0.5*min_slope*(mid_y/img_height)` 與
+L245–246 的 `assoc_window`／`0.18*center_x` 已隨之消失。）
+
+- [ ] **L109 / L122 / L125** `_fit_x_of_y`：`last_n=8`、最少 `>= 4` 點
+      （z(y) 在約 19 m 飽和之後就是靠這條，不是死路徑）
+- [ ] **L298**：`missed > max(4, track_bands // 3)`
+- [ ] **L311 / L313**：`missed >= 2`、`track_points[-2:]`
+- [ ] **L393**：`track_bands = max(int(track_bands), 16)`
       （WWH-7 已把參數名 `num_bands` → `track_bands` 並在 config 設 16，
       所以「默默改成 16」的坑已緩解；但 clamp 本身仍未說明理由）
 - [ ] **`geometry.py` L31**：`min_y_margin=0.05`（WWH-15 抽出 `CameraGeometry`
-      時從 lane_segmentation 搬過去的）
+      時從 lane_segmentation 搬過去的）。⚠ 它決定 `z_at` 的飽和深度：
+      `f_y*h/(0.05*512)` ≈ **19.2 m**，比直覺的「地平線附近才失效」近很多。
+      已由 `tests/test_geometry.py::test_z_at_saturates_beyond_the_clamp_depth` 釘住
 
 ### 3b. `lane_fitting.py` / `pitch_estimation.py` / `paint_evidence.py` 的常數
 WWH-9 與 WWH-15 各新增一批常數。它們的註解**普遍比 lane_segmentation 那批好**
@@ -108,12 +114,14 @@ WWH-9 與 WWH-15 各新增一批常數。它們的註解**普遍比 lane_segment
 
 `lane_fitting.py`
 - [ ] `_SHADOW_MARGIN_PX = 3.0` / `_SHADOW_MIN_OVERLAP_ROWS = 8`（L10–11）
-- [ ] `_FRAG_MAX_STEP_PX = 4.0`（L16）— **隱藏耦合**：註解說它是從
-      `min_slope = 0.3` 推的，但 `min_slope` 在 config 裡可調，改了不會連動
-- [ ] `_JUNCTION_TOL_PX = 20.0` / `_JUNCTION_SLOPE_ROWS = 10`（L23、L26）
-- [ ] `_REFINE_SEARCH_PX = 3` / `_REFINE_MIN_GRAD = 4.0`（L33、L39）
-- [ ] **（WWH-15 新增）** `_ZJUMP_ABS_M = 3.0` / `_ZJUMP_FRAC = 0.3`（L242–243）、
-      `_ZJUMP_EXTRAP_FACTOR = 1.5`（L250）—— 深度連續性截斷的門檻
+- [ ] `_FRAG_MAX_STEP_PX = 4.0`（L21）—— 原本的隱藏耦合（註解說從 config 的
+      `min_slope = 0.3` 推來）已解：`min_slope` 隨 legacy 分支刪掉，註解改成
+      誠實說明它是**實測值**（內緣實際不超過 ~3.3 px/row），不是推導值。
+      仍待辦：找一個真的推導得出來的界，或補上量測的樣本數
+- [ ] `_JUNCTION_TOL_PX = 20.0` / `_JUNCTION_SLOPE_ROWS = 10`（L28、L31）
+- [ ] `_REFINE_SEARCH_PX = 3` / `_REFINE_MIN_GRAD = 4.0`（L38、L44）
+- [ ] **（WWH-15 新增）** `_ZJUMP_ABS_M = 3.0` / `_ZJUMP_FRAC = 0.3`（L247–248）、
+      `_ZJUMP_EXTRAP_FACTOR = 1.5`（L255）—— 深度連續性截斷的門檻
 
 `paint_evidence.py`（**WWH-15 新增，L56–61**）
 - [ ] `_STRIPE_M = 0.125`（CARLA 實測標線寬）、`_RIDGE_THR = 10.0`、`_PEAK_PX = 4`、
@@ -129,10 +137,10 @@ WWH-9 與 WWH-15 各新增一批常數。它們的註解**普遍比 lane_segment
       `resid_mad_k=5.0`（L212，spline 路徑）
 
 ### 4. 殘留 TODO 與死參數
-- [ ] **L87** TODO：`replace 1.0 multiplier with p95 lateral offset from CARLA GT` 尚未完成
-- [ ] `roi_near`（L370）/ `min_slope`（L367）/ `lane_band_tolerance`（L369）仍僅
-      legacy 路徑使用 → 幾何模式啟用後是雜訊，考慮集中到 legacy 分支或清理
-      （注意 `min_slope` 另被 `_FRAG_MAX_STEP_PX` 的推導引用，見 3b）
+（`roi_far` / `roi_near` / `min_slope` / `lane_band_tolerance` 已全部刪除，
+連同整條 legacy 分支。）
+
+- [ ] **L85** TODO：`replace 1.0 multiplier with p95 lateral offset from CARLA GT` 尚未完成
 
 ---
 
@@ -155,18 +163,18 @@ WWH-9 與 WWH-15 各新增一批常數。它們的註解**普遍比 lane_segment
 
 ## 中優先
 
-### D. 沒有任何單元測試
-**2026-08-27 覆核：repo 內仍無自己的 test。**（`carla_module/realtime_test.py`
-是需要 CARLA server 的整合測試；`elsed_src/pybind11/tests/` 是 vendored 的第三方測試。）
-WWH-8 的等價性測試、WWH-15 的煙霧測試都是臨時腳本，沒有進版控。
+### D. 單元測試（已有 48 個，覆蓋面仍窄）
+`tests/` 已建立（2026-08-27）：投影模型、量測階段（含退化情形）、三道閘門的
+邊界案例。`uv run --no-sync python -m pytest`，約 2 秒，不需影像/權重/GPU。
+**刻意不測**追蹤器與擬合鏈的整體行為 —— 那種測試會很脆，準度本來就該由
+MAE 全掃判。
 
-- [ ] 至少為 `pitch_estimation`（windowed / spline / degenerate fallback）與
-      `lane_segmentation` 幾何推導加幾個 pinhole 合成資料的單元測試
 - [ ] `debug/` 底下的診斷腳本（`check_width_calibration.py` 等）有現成的
       合成/實測驗證邏輯，可以抽成正式測試
-- [ ] WWH-15 的三道閘門（`filter_paint_segments` / `truncate_at_evidence_break` /
-      `truncate_at_depth_jump`）都是純函式、易測，且各自有踩過坑的邊界案例
-      （leading-drop、大列距缺口），優先補
+- [ ] `inner_chain_points` 的 shadowing / fragment / junction purge 三段各自
+      有明確的輸入輸出契約，可以用合成鏈測，目前完全沒覆蓋
+- [ ] 沒有端到端的回歸釘樁。現在唯一的是「單張 000160 MAE 要等於 0.5581」，
+      靠人記得跑。可以考慮存一組小樣本的期望值進版控
 
 ## 低優先
 

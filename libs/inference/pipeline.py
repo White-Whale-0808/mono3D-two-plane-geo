@@ -29,11 +29,10 @@ from libs.inference.pitch_estimation  import estimate_pitch_from_curves
 
 def infer_one(
     model, image_path, device, resize_size,
-    min_slope, min_segment_length_near, min_segment_length_far, lane_band_tolerance,
+    min_segment_length_near, min_segment_length_far,
     num_samples,
-    f_x, f_y, w_real,
+    f_x, f_y, w_real, camera_height,
     *,
-    camera_height: float = None,
     samples_per_meter: float = None,
     track_bands: int = 16,
     method: str = "windowed",
@@ -43,6 +42,9 @@ def infer_one(
 
     Parameters
     ----------
+    f_x, f_y, w_real, camera_height
+        Camera calibration. Required — the tracker's thresholds and the
+        paint-evidence probe windows are all derived from it.
     return_debug
         If True, also return a dict with intermediate values.
     """
@@ -53,22 +55,18 @@ def infer_one(
     # 2. ELSED line detection
     segments = detect_lines_with_elsed(masked_road, min_segment_length_near, min_segment_length_far)
 
-    # geometry mode: paint-evidence checks need the stripe-width projection
-    geometry_mode = all(v is not None for v in (f_x, f_y, camera_height, w_real))
-
     # 2b. paint-evidence segment gate: drop segments that are not painted-
     # marking edges (shadow boundaries, kerbs, walls) so the tracker seeds
     # on real paint — see paint_evidence.py
-    if geometry_mode and len(segments):
+    if len(segments):
         segments = filter_paint_segments(
             resized_image, segments, f_x, f_y, camera_height, w_real)
 
     # 3. lane segmentation (per-band innermost selection)
     inner_left, inner_right = split_left_right_lines(
-        segments, resized_image.width, min_slope,
-        resized_image.height, lane_band_tolerance, track_bands=track_bands,
-        f_x=f_x, f_y=f_y, camera_height=camera_height, w_real=w_real,
-    )
+        segments, resized_image.width, resized_image.height,
+        track_bands=track_bands,
+        f_x=f_x, f_y=f_y, camera_height=camera_height, w_real=w_real)
 
     # 4. lane fitting — per-row inner-envelope chain (w_real is inner-edge
     # to inner-edge; the tracker keeps whole marking groups for evidence),
@@ -78,15 +76,14 @@ def infer_one(
         resized_image, inner_chain_points(inner_left,  True),  True)
     right_points = refine_inner_points(
         resized_image, inner_chain_points(inner_right, False), False)
-    if geometry_mode:
-        left_points = truncate_at_evidence_break(
-            resized_image, left_points, True, f_x, f_y, camera_height, w_real)
-        right_points = truncate_at_evidence_break(
-            resized_image, right_points, False, f_x, f_y, camera_height, w_real)
-        # depth-continuity guard: real paint beyond a crest occlusion is
-        # still a DIFFERENT lane section — never join it to the near chain
-        left_points, right_points = truncate_at_depth_jump(
-            left_points, right_points, f_x, w_real, resized_image.height)
+    left_points = truncate_at_evidence_break(
+        resized_image, left_points, True, f_x, f_y, camera_height, w_real)
+    right_points = truncate_at_evidence_break(
+        resized_image, right_points, False, f_x, f_y, camera_height, w_real)
+    # depth-continuity guard: real paint beyond a crest occlusion is
+    # still a DIFFERENT lane section — never join it to the near chain
+    left_points, right_points = truncate_at_depth_jump(
+        left_points, right_points, f_x, w_real, resized_image.height)
     left_curve  = lane_curve(left_points)
     right_curve = lane_curve(right_points)
 
