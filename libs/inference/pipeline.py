@@ -6,7 +6,9 @@ Stages
 2. ELSED line detection
 3. Lane segmentation   split_left_right_lines (ROI-based, innermost)
 4. Lane fitting        inner-chain points → continuous lane curves
-5. Pitch estimation    widths from curves → continuous spline pitch(z)
+5. Pitch estimation    widths from curves → continuous pitch(z); the default
+                       estimator is `windowed` (local z-window Theil-Sen),
+                       `spline` is opt-in via the `method` argument
 """
 
 import cv2
@@ -88,7 +90,8 @@ def infer_one(
     left_curve  = lane_curve(left_points)
     right_curve = lane_curve(right_points)
 
-    # 5. pitch estimation — widths from the curves → continuous spline pitch(z)
+    # 5. pitch estimation — widths from the curves → continuous pitch(z)
+    # (`method` selects windowed Theil-Sen, the default, or the global spline)
     pitch_curve = estimate_pitch_from_curves(
         left_curve, right_curve, f_x, f_y, resized_image.height, w_real,
         num_samples=num_samples, samples_per_meter=samples_per_meter,

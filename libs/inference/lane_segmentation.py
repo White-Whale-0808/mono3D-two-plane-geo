@@ -4,11 +4,11 @@ import numpy as np
 Lane segmentation via near-to-far continuity tracking, with geometry-derived
 thresholds.
 
-Tracking design (see docs/lane_segmentation_issues.md 問題 4):
+Tracking design (see docs/papers/lane_segmentation_design_logic.drawio):
   seed at the bottom (innermost rule), track upward band by band using a local
   line model, re-seed past dead ends (junctions).
 
-Parameter derivation (see docs/lane_segmentation_parameter_problem.md):
+Parameter derivation (see docs/papers/lane_segmentation_design_logic.drawio):
   Under the flat-ground pinhole model with camera height h,
 
       x - cx = f_x * X / z          z(y) = f_y * h / (y - cy)
@@ -369,7 +369,6 @@ def split_left_right_lines(
     img_height: int,
     lane_band_tolerance: float,
     roi_near: float = 0.3,
-    roi_far: float = 0.8,   # kept for signature compatibility (unused)
     track_bands: int = 16,
     *,
     f_x: float = None,
@@ -387,8 +386,6 @@ def split_left_right_lines(
     min_slope, lane_band_tolerance, roi_near : float
         Legacy hand-tuned thresholds — used ONLY when camera geometry is not
         provided (see below).
-    roi_far : float
-        Unused (kept for signature compatibility).
     track_bands : int
         Tracking band count (internally clamped to >= 16). Independent of
         lane_fitting's num_bands — tracking steps and fitting knots are
