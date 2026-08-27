@@ -1,6 +1,6 @@
 import numpy as np
 
-from libs.inference.lane_segmentation import _Geometry
+from libs.inference.geometry import CameraGeometry
 
 """
 Paint-evidence photometric checks (WWH-15).
@@ -26,7 +26,7 @@ Per probe location (x, y) on a 3-row-averaged horizontal profile I:
 
 with [lo, hi] = [k+2, 3k+8] px and k = f_x·_STRIPE_M/z_min(y) the stripe-width
 upper bound from projection geometry (z_min carries the ±15° grade margin,
-see _Geometry). Real paint scores ~25+ gray levels; a shadow boundary fails
+see geometry.CameraGeometry). Real paint scores ~25+ gray levels; a shadow boundary fails
 (one side all dark, the other a plateau that never drops), and so do kerbs
 and walls (insufficient contrast against the road).
 
@@ -87,7 +87,7 @@ def filter_paint_segments(image_rgb, segments, f_x, f_y, camera_height, w_real):
         return segs
     gray = _gray(image_rgb)
     h, w = gray.shape
-    geom = _Geometry(f_x, f_y, camera_height, w_real, w, h)
+    geom = CameraGeometry(f_x, f_y, camera_height, w_real, w, h)
 
     keep = np.zeros(len(segs), dtype=bool)
     for si, (x1, y1, x2, y2) in enumerate(segs):
@@ -133,7 +133,7 @@ def truncate_at_evidence_break(image_rgb, points, is_left,
         return pts
     gray = _gray(image_rgb)
     h, w = gray.shape
-    geom = _Geometry(f_x, f_y, camera_height, w_real, w, h)
+    geom = CameraGeometry(f_x, f_y, camera_height, w_real, w, h)
     out_sign = -1 if is_left else 1
 
     pts = pts[np.argsort(-pts[:, 1])]        # near (large y) first
