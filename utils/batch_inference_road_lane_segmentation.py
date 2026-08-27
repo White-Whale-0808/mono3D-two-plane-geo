@@ -5,11 +5,8 @@ import yaml
 from pathlib import Path
 import numpy as np
 import pandas as pd
-from libs.inference.road_segmentation import load_pidnet, predict_road, apply_road_mask
-from libs.inference.line_segmentation import detect_lines_with_elsed
-from libs.inference.lane_segmentation import split_left_right_lines
-from libs.inference.lane_fitting import inner_chain_points, refine_inner_points, lane_curve
-from libs.inference.pitch_estimation import estimate_pitch_from_curves
+from libs.inference.road_segmentation import load_pidnet
+from libs.inference.pipeline import infer_one
 from libs.road_profile_gt import load_profile_gt
 from libs.visualization.profile_mae_visualization import plot_profile_mae
 from libs.visualization.route_profile_visualization import plot_route_profile
@@ -86,33 +83,17 @@ def main():
             continue
 
         try:
-            # 1. Road segmentation
-            resized_image, pred_mask = predict_road(model, str(image_path), device, resize_size)
-            masked_road = apply_road_mask(resized_image, pred_mask)
-
-            # 2. Line segmentation
-            segments = detect_lines_with_elsed(
-                masked_road, min_segment_length_near, min_segment_length_far
-            )
-
-            # 3. Lane segmentation
-            inner_left, inner_right = split_left_right_lines(
-                segments, resized_image.width, min_slope,
-                resized_image.height, lane_band_tolerance, track_bands=track_bands,
-                f_x=f_x, f_y=f_y, camera_height=camera_height, w_real=w_real,
-            )
-
-            # 4. Lane fitting — inner-chain points → continuous lane curves
-            left_curve  = lane_curve(refine_inner_points(
-                resized_image, inner_chain_points(inner_left,  True),  True))
-            right_curve = lane_curve(refine_inner_points(
-                resized_image, inner_chain_points(inner_right, False), False))
-
-            # 5. Pitch estimation — widths from curves → continuous pitch(z)
-            pitch_curve = estimate_pitch_from_curves(
-                left_curve, right_curve, f_x, f_y, resized_image.height, w_real,
-                num_samples=num_samples, samples_per_meter=samples_per_meter,
-                method=pitch_method)
+            # Full pipeline (road seg → ELSED → paint gate → tracking →
+            # fitting + evidence/depth truncation → pitch); the batch runner
+            # only needs the pitch curve, so it goes through infer_one and
+            # never re-implements the stages (that duplication silently ran
+            # the pre-WWH-15 pipeline here once already).
+            pitch_curve = infer_one(
+                model, str(image_path), device, resize_size,
+                min_slope, min_segment_length_near, min_segment_length_far,
+                lane_band_tolerance, num_samples, f_x, f_y, w_real,
+                camera_height=camera_height, samples_per_meter=samples_per_meter,
+                track_bands=track_bands, method=pitch_method)["pitch_curve"]
 
             if pitch_curve["pitch_at"] is not None:
                 z_vis_min_col[i] = round(float(pitch_curve["z_visible_min"]), 2)

@@ -9,7 +9,9 @@ from libs.inference.road_segmentation import load_pidnet, predict_road, apply_ro
 from libs.inference.line_segmentation import detect_lines_with_elsed
 from libs.inference.lane_segmentation import split_left_right_lines
 from libs.visualization.lane_visualization import draw_lane_lines, create_overlay, draw_line_segments, save_lane_fitting_steps
-from libs.inference.lane_fitting import inner_chain_points, refine_inner_points, lane_curve
+from libs.inference.lane_fitting import (inner_chain_points, refine_inner_points,
+                                         lane_curve, truncate_at_depth_jump)
+from libs.inference.paint_evidence import filter_paint_segments, truncate_at_evidence_break
 from libs.visualization.lane_visualization import draw_lane_curves
 from libs.inference.pitch_estimation import estimate_pitch_from_curves
 from libs.visualization.pitch_visualization import plot_pitch_profile, plot_y3d_profile, save_pitch_estimation_steps
@@ -74,6 +76,12 @@ def main():
     Line segementation
     """
     segments = detect_lines_with_elsed(masked_road, min_segment_length_near, min_segment_length_far)
+
+    # paint-evidence segment gate (geometry mode only) — same as pipeline.py
+    geometry_mode = all(v is not None for v in (f_x, f_y, camera_height, w_real))
+    if geometry_mode and len(segments):
+        segments = filter_paint_segments(
+            resized_image, segments, f_x, f_y, camera_height, w_real)
     t2 = time.perf_counter()
 
     """
@@ -93,6 +101,13 @@ def main():
         resized_image, inner_chain_points(inner_left, True), True)
     right_points = refine_inner_points(
         resized_image, inner_chain_points(inner_right, False), False)
+    if geometry_mode:
+        left_points = truncate_at_evidence_break(
+            resized_image, left_points, True, f_x, f_y, camera_height, w_real)
+        right_points = truncate_at_evidence_break(
+            resized_image, right_points, False, f_x, f_y, camera_height, w_real)
+        left_points, right_points = truncate_at_depth_jump(
+            left_points, right_points, f_x, w_real, resized_image.height)
     left_curve = lane_curve(left_points)
     right_curve = lane_curve(right_points)
     t4 = time.perf_counter()

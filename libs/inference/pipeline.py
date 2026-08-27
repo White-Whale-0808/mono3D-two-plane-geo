@@ -34,6 +34,7 @@ def infer_one(
     camera_height: float = None,
     samples_per_meter: float = None,
     track_bands: int = 16,
+    method: str = "windowed",
     return_debug: bool = False,
 ):
     """Run the full pipeline on a single image.
@@ -90,7 +91,8 @@ def infer_one(
     # 5. pitch estimation — widths from the curves → continuous spline pitch(z)
     pitch_curve = estimate_pitch_from_curves(
         left_curve, right_curve, f_x, f_y, resized_image.height, w_real,
-        num_samples=num_samples, samples_per_meter=samples_per_meter)
+        num_samples=num_samples, samples_per_meter=samples_per_meter,
+        method=method)
 
     result = {"pitch_curve": pitch_curve}
     if return_debug:
