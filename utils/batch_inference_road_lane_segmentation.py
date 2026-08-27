@@ -22,8 +22,6 @@ image_batch_path          = config["input"]["image_batch_path"]
 resize_size               = tuple(config["input"]["resize_size"])
 min_segment_length_near   = config["line_segmentation"]["min_segment_length_near"]
 min_segment_length_far    = config["line_segmentation"]["min_segment_length_far"]
-min_slope                 = config["lane_segmentation"]["min_slope"]
-lane_band_tolerance       = config["lane_segmentation"]["lane_band_tolerance"]
 track_bands               = config["lane_segmentation"].get("track_bands", 16)
 num_samples               = config["lane_fitting"]["num_samples"]
 samples_per_meter         = config["lane_fitting"].get("samples_per_meter")
@@ -90,9 +88,9 @@ def main():
             # the pre-WWH-15 pipeline here once already).
             pitch_curve = infer_one(
                 model, str(image_path), device, resize_size,
-                min_slope, min_segment_length_near, min_segment_length_far,
-                lane_band_tolerance, num_samples, f_x, f_y, w_real,
-                camera_height=camera_height, samples_per_meter=samples_per_meter,
+                min_segment_length_near, min_segment_length_far,
+                num_samples, f_x, f_y, w_real, camera_height,
+                samples_per_meter=samples_per_meter,
                 track_bands=track_bands, method=pitch_method)["pitch_curve"]
 
             if pitch_curve["pitch_at"] is not None:

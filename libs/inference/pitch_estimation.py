@@ -30,17 +30,21 @@ def back_project_widths(widths, f_x, f_y, image_height, w_real):
 
 
 def sample_widths_from_curves(left_curve, right_curve, num_samples, *,
-                              f_x=None, w_real=None, samples_per_meter=None):
+                              f_x, w_real, samples_per_meter=None):
     """(y, width) samples over the y-overlap of two continuous lane curves.
 
     The curves come from lane_fitting.lane_curve: {"y": ascending, "x": ...},
     already gap-bridged. Width is a metric quantity (only meaningful through
     f_x / w_real), so sampling it belongs to this stage, not lane_fitting.
 
-    Geometry mode (f_x and w_real given): dense candidate sweep → depth via
-    z = f_x·w_real/width → resample uniformly in z (samples_per_meter, or
-    num_samples when unset) so each meter of visible depth gets equal sample
-    density. Legacy mode: y-uniform num_samples.
+    Dense candidate sweep → depth via z = f_x·w_real/width → resample uniformly
+    in z, so each metre of visible depth gets equal sample density. The count
+    is `samples_per_meter` × the visible depth range, or a fixed `num_samples`
+    when samples_per_meter is unset.
+
+    Sampling uniformly in y instead was the pre-WWH-9 behaviour and is gone:
+    y-uniform spends most of its samples on the near few metres (z ∝ 1/(y-cy)),
+    which is exactly where the pitch profile needs them least.
     """
     if left_curve is None or right_curve is None:
         return np.empty((0, 2))
@@ -53,31 +57,27 @@ def sample_widths_from_curves(left_curve, right_curve, num_samples, *,
         return (np.interp(ys, right_curve["y"], right_curve["x"])
                 - np.interp(ys, left_curve["y"], left_curve["x"]))
 
-    if f_x is not None and w_real is not None:
-        candidate_ys = np.linspace(y_lo, y_hi, 2000)
-        ws = width_at(candidate_ys)
-        valid = ws > 0
-        if valid.sum() < 2:
-            return np.empty((0, 2))
-        ys_v, ws_v = candidate_ys[valid], ws[valid]
-        zs = f_x * w_real / ws_v
-        order = np.argsort(zs)
-        zs_s, ys_s, ws_s = zs[order], ys_v[order], ws_v[order]
-        if samples_per_meter is not None:
-            # Scene-invariant density: n scales with the visible depth range,
-            # capped at the candidate sweep resolution.
-            z_range = zs_s[-1] - zs_s[0]
-            n_samples = int(np.clip(np.ceil(z_range * samples_per_meter),
-                                    2, len(candidate_ys)))
-        else:
-            n_samples = num_samples
-        target_zs = np.linspace(zs_s[0], zs_s[-1], n_samples)
-        target_ys = np.interp(target_zs, zs_s, ys_s)
-        target_ws = np.interp(target_zs, zs_s, ws_s)
-        return np.column_stack([target_ys, target_ws])
-
-    sample_ys = np.linspace(y_lo, y_hi, num_samples)
-    return np.column_stack([sample_ys, width_at(sample_ys)])
+    candidate_ys = np.linspace(y_lo, y_hi, 2000)
+    ws = width_at(candidate_ys)
+    valid = ws > 0
+    if valid.sum() < 2:
+        return np.empty((0, 2))
+    ys_v, ws_v = candidate_ys[valid], ws[valid]
+    zs = f_x * w_real / ws_v
+    order = np.argsort(zs)
+    zs_s, ys_s, ws_s = zs[order], ys_v[order], ws_v[order]
+    if samples_per_meter is not None:
+        # Scene-invariant density: n scales with the visible depth range,
+        # capped at the candidate sweep resolution.
+        z_range = zs_s[-1] - zs_s[0]
+        n_samples = int(np.clip(np.ceil(z_range * samples_per_meter),
+                                2, len(candidate_ys)))
+    else:
+        n_samples = num_samples
+    target_zs = np.linspace(zs_s[0], zs_s[-1], n_samples)
+    target_ys = np.interp(target_zs, zs_s, ys_s)
+    target_ws = np.interp(target_zs, zs_s, ws_s)
+    return np.column_stack([target_ys, target_ws])
 
 
 def estimate_pitch_from_curves(left_curve, right_curve, f_x, f_y, image_height,

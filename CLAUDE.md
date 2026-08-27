@@ -30,7 +30,7 @@ python -m utils.batch_inference_road_lane_segmentation
 # CARLA real-time test (requires running CARLA server)
 python carla_module/realtime_test.py [--host HOST] [--port PORT] [--map MAP]
 
-# Plot GT vs predicted pitch
+# Same as the single-image command above — main.py is a thin wrapper around it
 python main.py
 ```
 
@@ -48,12 +48,11 @@ road_segmentation → line_segmentation → lane_segmentation → lane_fitting �
 |---|---|---|
 | road_segmentation | `libs/inference/road_segmentation.py` | PIDNet-L semantic segmentation → binary road mask |
 | line_segmentation | `libs/inference/line_segmentation.py` | ELSED line detection with adaptive length threshold (perspective-aware) |
-| lane_segmentation | `libs/inference/lane_segmentation.py` | Near-to-far continuity tracking: seed innermost lanes at bottom, track upward band-by-band by predicted-x association. Thresholds (association tolerance, seed window, slope gates, model memory) are **derived from projection geometry** when camera intrinsics + height are supplied; otherwise legacy hand-tuned values are used |
+| lane_segmentation | `libs/inference/lane_segmentation.py` | Near-to-far continuity tracking: seed innermost lanes at bottom, track upward band-by-band by predicted-x association. Thresholds (association tolerance, seed window, slope gates, model memory) are **derived from projection geometry** — camera intrinsics + height are required |
 | lane_fitting | `libs/inference/lane_fitting.py` | Inner-chain extraction (`inner_chain_points`: shadowing → dense per-row inner envelope → fragments split at gaps / x-jumps → junction-consistency purge keeping the largest fragment group) → sub-pixel edge refinement on the **unmasked** image (`refine_inner_points`: nearest qualifying gradient peak ±3 px, parabola sub-pixel) → continuous gap-bridged lane curve per side (`lane_curve`) |
 | pitch_estimation | `libs/inference/pitch_estimation.py` | `estimate_pitch_from_curves`: sample lane widths from the two curves (z-uniform), inverse perspective → depth, then continuous pitch(z) via local z-window Theil-Sen slopes (`method: windowed`, default — window ±max(1 m, 0.15·z) is the explicit spatial resolution) or the global weighted spline (`method: spline`) |
 
-In **geometry mode** (all of `f_x`/`f_y`/`camera_height`/`w_real` present) the
-pipeline additionally runs the WWH-15 evidence guards; legacy mode skips them:
+The pipeline also runs the WWH-15 evidence guards:
 
 - `libs/inference/paint_evidence.py` — photometric "is this actually paint?"
   checks (a marking is a bright ridge of bounded width). `filter_paint_segments`
@@ -67,11 +66,11 @@ pipeline additionally runs the WWH-15 evidence guards; legacy mode skips them:
   DISCONNECTED section and is never joined to the near chain).
 
 `lane_segmentation.py` is a single unified tracker (the older slope-dependent
-`_positive_angle.py` / `_negative_angle.py` variants have been removed). It
-runs in two modes: a **geometry-driven** mode when `f_x`, `f_y`, `w_real` and
-`camera_height` are all provided (thresholds computed from the pinhole model,
-see the module docstring), and a **legacy** fallback using the hand-tuned
-`min_slope` / `lane_band_tolerance` when any of those is missing.
+`_positive_angle.py` / `_negative_angle.py` variants have been removed).
+`f_x`, `f_y`, `w_real` and `camera_height` are **required** — every threshold
+is computed from the pinhole model (see the module docstring). The hand-tuned
+fallback for un-calibrated cameras (`min_slope` / `lane_band_tolerance` /
+`roi_near` / `roi_far`) was removed 2026-08-27: no caller ever reached it.
 
 ## Critical Conventions
 
@@ -86,7 +85,7 @@ see the module docstring), and a **legacy** fallback using the hand-tuned
 Config sections map 1:1 to pipeline stages:
 - `road_segmentation` — (currently empty, PIDNet uses argmax not threshold)
 - `line_segmentation` — `min_segment_length_near`, `min_segment_length_far`
-- `lane_segmentation` — `min_slope`, `lane_band_tolerance` (legacy fallback only; ignored once `camera_height` enables the geometry-driven path), `track_bands` (continuity-tracking band count, clamped to >= 16 internally; independent of `lane_fitting.num_bands`)
-- `lane_fitting` — `samples_per_meter` (geometry mode: z-uniform width-sample density in pitch_estimation, per meter of visible depth), `num_samples` (width-sample fallback when `samples_per_meter` is unset or in legacy y-uniform mode). `inner_chain_points` itself has no density tunables: shadowing + dense per-row inner envelope + fragment/junction purge, every kept row becomes a point — `lane_curve` (continuous gap-bridged polyline per side) is the model and pitch_estimation resamples it. `w_real` is inner-edge-to-inner-edge, so widths are measured on inner edges. **It is road-specific**: 3.25 comes from this dataset's double-yellow-left / single-white-right layout on a 3.5 m lane; a different marking combination re-derives it (see the config comment). Width sampling and pitch live in pitch_estimation (`sample_widths_from_curves` / `estimate_pitch_from_curves`)
+- `lane_segmentation` — `track_bands` only (continuity-tracking band count, clamped to >= 16 internally; independent of `lane_fitting.num_bands`). All other thresholds are derived from `pitch_estimation`'s calibration
+- `lane_fitting` — `samples_per_meter` (geometry mode: z-uniform width-sample density in pitch_estimation, per meter of visible depth), `num_samples` (width-sample fallback when `samples_per_meter` is unset). `inner_chain_points` itself has no density tunables: shadowing + dense per-row inner envelope + fragment/junction purge, every kept row becomes a point — `lane_curve` (continuous gap-bridged polyline per side) is the model and pitch_estimation resamples it. `w_real` is inner-edge-to-inner-edge, so widths are measured on inner edges. **It is road-specific**: 3.25 comes from this dataset's double-yellow-left / single-white-right layout on a 3.5 m lane; a different marking combination re-derives it (see the config comment). Width sampling and pitch live in pitch_estimation (`sample_widths_from_curves` / `estimate_pitch_from_curves`)
 - `pitch_estimation` — `f_x`, `f_y`, `w_real`, `camera_height`, `camera_forward_offset` (`camera_height` feeds the lane_segmentation geometry; CARLA overrides `f_y=f_x` and `camera_height=2.4`), `method` (`windowed` default = local z-window Theil-Sen, no global residual filter; `spline` = global weighted UnivariateSpline with Theil-Sen MAD prefilter)
 - `ground_truth` — **not a pipeline stage**: this is the reference the runners score against. `height_source` picks which column of `road_profile.csv` supplies the profile height — `auto` (default: `z_mesh` when present, else `z`), `analytic` (`z`, the OpenDRIVE centreline) or `mesh` (`z_mesh`, the downward ray-cast). Asking for `mesh` on a pre-WWH-14 dataset raises; only `auto` falls back. The collector's road surface deviates from the analytic centreline in a few localised sections and the camera sees it, so `mesh` is the better reference — see the module docstring in `libs/road_profile_gt.py` for the evidence, and **do not re-litigate it with absolute-height MAE**, which is dominated by a per-frame constant offset.

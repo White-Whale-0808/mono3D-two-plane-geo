@@ -139,8 +139,6 @@ def run_pipeline(
     resize_size = tuple(cfg["input"]["resize_size"])          # (512, 1024)
     min_len_near = cfg["line_segmentation"]["min_segment_length_near"]
     min_len_far  = cfg["line_segmentation"]["min_segment_length_far"]
-    min_slope   = cfg["lane_segmentation"]["min_slope"]
-    tolerance   = cfg["lane_segmentation"]["lane_band_tolerance"]
     extra_pts   = cfg["lane_fitting"]["extra_points_per_segment"]
     num_bands   = cfg["lane_fitting"]["num_bands"]
     num_samples = cfg["lane_fitting"]["num_samples"]
@@ -159,14 +157,8 @@ def run_pipeline(
 
     # 階段 3：左右車道分類
     inner_left, inner_right = split_left_right_lines(
-        segments,
-        image_width=resized_image.width,
-        min_slope=min_slope,
-        img_height=resized_image.height,
-        lane_band_tolerance=tolerance,
-        f_x=f_x, f_y=f_y, w_real=w_real,
-        camera_height=cfg["pitch_estimation"].get("camera_height", 2.4),
-    )
+        segments, image_width=resized_image.width, img_height=resized_image.height, f_x=f_x,
+        f_y=f_y, w_real=w_real, camera_height=cfg["pitch_estimation"].get("camera_height", 2.4))
 
     # 車道線不足時（路口、遮蔽等），回傳空結果
     if not inner_left or not inner_right:

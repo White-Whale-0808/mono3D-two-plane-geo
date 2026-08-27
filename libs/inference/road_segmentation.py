@@ -53,42 +53,19 @@ def predict_road(model, image_path, device, resize_size):
     pred_mask = (pred == ROAD_CLASS).astype(np.uint8)
     return resized_image, pred_mask
 
-# The result from the resnet101 model is bad, so we will not use it for now. We use another powerful model for road segmentation
-# def predict_road(model, image_path, device, resize_size, threshold):
-#     image = Image.open(image_path).convert("RGB")  # The torch model expects RGB input
-
-#     resize = transforms.Resize(
-#         resize_size,
-#         interpolation=InterpolationMode.BILINEAR
-#     )
-#     resized_image = resize(image)
-
-#     transformed_image = transforms.ToTensor()(resized_image)
-#     input_image = transformed_image.unsqueeze(0).to(device)
-#     with torch.no_grad(): 
-#         logits = model(input_image)["out"]
-#         probs = torch.sigmoid(logits)
-#         pred_mask = (probs > threshold).float()
-#     pred_mask = pred_mask.squeeze().cpu().numpy().astype(np.uint8)
-
-#     return resized_image, pred_mask
+# The earlier Resnet101 variant of predict_road (sigmoid + `threshold`) was
+# dropped: too slow and not accurate enough. That is also why `threshold` and
+# `mask_erosion_kernel` no longer appear in the config.
 
 def apply_road_mask(resized_image, pred_mask):
     image = np.array(resized_image)
     road_mask_255 = (pred_mask * 255).astype(np.uint8)
 
     """
-    The erosion step is crucial to mitigate jagged boundary artifacts that can arise from the segmentation process.
-    Give up doing erosion: it will remove some lane pixels that will make the lane fitting later more difficult.
+    No morphological cleanup is applied to the mask. Erosion / closing /
+    blur-threshold were all tried to smooth the jagged segmentation boundary,
+    and all of them remove lane pixels, which makes the later lane fitting
+    harder. A jagged boundary is the lesser problem.
     """
-    # kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (erosion_kernel, erosion_kernel))
-    # road_mask_255 = cv2.erode(road_mask_255, kernel)  # Shrink mask inward to remove jagged boundary artifacts
-    # kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (601, 601))
-    # road_mask_255 = cv2.morphologyEx(road_mask_255, cv2.MORPH_CLOSE, kernel)
-
-    # blurred = cv2.GaussianBlur(road_mask_255, (51, 51), 0)
-    # road_mask_255 = (blurred > 127).astype(np.uint8) * 255
-
-    # smoothed_mask = (road_mask_255 // 255).astype(np.uint8)  # Convert back to 0/1 for create_overlay
     masked_road = cv2.bitwise_and(image, image, mask=road_mask_255)  # Image and Image when mask is true, else black. The cv2.bitwise_and accepts RGB images.
     return masked_road

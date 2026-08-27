@@ -12,21 +12,21 @@ input:
     - 1024
 
 road_segmentation:
-  # threshold: 0.5  # The original Resnet101 model is too slow and not accurate enough, so we switched to PIDNet_L 
-  # mask_erosion_kernel: 3  # Erode mask inward by this many pixels to eliminate edge artifacts
+  # No parameters: PIDNet-L uses argmax over classes, and no morphological
+  # cleanup is applied to the mask (both tried and rejected, see the stage module)
 
 line_segmentation:
   min_segment_length_near: 65  # Length threshold at the bottom of the image (near camera)
   min_segment_length_far: 0   # Length threshold at the top of the image (far / uphill); threshold is interpolated linearly between these two values based on segment mid-y
 
 lane_segmentation:
-  min_slope: 0.3
-  # roi: 0.2
-  lane_band_tolerance: 10  # Max x_at_bottom deviation (pixels) from innermost segment to still be considered the same lane marking
+  # Association tolerance, seed window, slope gates and model memory are all
+  # derived from the camera geometry in pitch_estimation (f_x/f_y/camera_height/
+  # w_real); the old hand-tuned min_slope / lane_band_tolerance are gone.
   track_bands: 16  # Horizontal bands for near-to-far continuity tracking (internally clamped to >= 16); independent of lane_fitting.num_bands
 
 lane_fitting:
-  num_samples: 80  # Fallback width-sample count: y-uniform legacy mode, or geometry mode when samples_per_meter is unset
+  num_samples: 80  # Fixed width-sample count, used only when samples_per_meter is unset (samples_per_meter scales with visible depth and is preferred)
   samples_per_meter: 6  # Geometry mode: width-sample density in pitch_estimation, per meter of visible depth (scene-invariant); inner-chain points are dense per-row and not affected
 
 pitch_estimation:

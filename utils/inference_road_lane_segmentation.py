@@ -27,8 +27,6 @@ image_path = config["input"]["image_path"]
 resize_size = tuple(config["input"]["resize_size"])
 min_segment_length_near = config["line_segmentation"]["min_segment_length_near"]
 min_segment_length_far  = config["line_segmentation"]["min_segment_length_far"]
-min_slope = config["lane_segmentation"]["min_slope"]
-lane_band_tolerance = config["lane_segmentation"]["lane_band_tolerance"]
 track_bands = config["lane_segmentation"].get("track_bands", 16)
 alpha = config["visualization"]["alpha"]
 save_path = config["visualization"]["save_path"]
@@ -77,9 +75,8 @@ def main():
     """
     segments = detect_lines_with_elsed(masked_road, min_segment_length_near, min_segment_length_far)
 
-    # paint-evidence segment gate (geometry mode only) — same as pipeline.py
-    geometry_mode = all(v is not None for v in (f_x, f_y, camera_height, w_real))
-    if geometry_mode and len(segments):
+    # paint-evidence segment gate — same as pipeline.py
+    if len(segments):
         segments = filter_paint_segments(
             resized_image, segments, f_x, f_y, camera_height, w_real)
     t2 = time.perf_counter()
@@ -88,10 +85,9 @@ def main():
     Lane segementation
     """
     inner_left, inner_right = split_left_right_lines(
-        segments, resized_image.width, min_slope, resized_image.height,
-        lane_band_tolerance, track_bands=track_bands,
-        f_x=f_x, f_y=f_y, camera_height=camera_height, w_real=w_real,
-    )
+        segments, resized_image.width, resized_image.height,
+        track_bands=track_bands,
+        f_x=f_x, f_y=f_y, camera_height=camera_height, w_real=w_real)
     t3 = time.perf_counter()
 
     """
@@ -101,13 +97,12 @@ def main():
         resized_image, inner_chain_points(inner_left, True), True)
     right_points = refine_inner_points(
         resized_image, inner_chain_points(inner_right, False), False)
-    if geometry_mode:
-        left_points = truncate_at_evidence_break(
-            resized_image, left_points, True, f_x, f_y, camera_height, w_real)
-        right_points = truncate_at_evidence_break(
-            resized_image, right_points, False, f_x, f_y, camera_height, w_real)
-        left_points, right_points = truncate_at_depth_jump(
-            left_points, right_points, f_x, w_real, resized_image.height)
+    left_points = truncate_at_evidence_break(
+        resized_image, left_points, True, f_x, f_y, camera_height, w_real)
+    right_points = truncate_at_evidence_break(
+        resized_image, right_points, False, f_x, f_y, camera_height, w_real)
+    left_points, right_points = truncate_at_depth_jump(
+        left_points, right_points, f_x, w_real, resized_image.height)
     left_curve = lane_curve(left_points)
     right_curve = lane_curve(right_points)
     t4 = time.perf_counter()

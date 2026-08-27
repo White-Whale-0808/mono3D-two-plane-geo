@@ -11,8 +11,13 @@ _SHADOW_MARGIN_PX = 3.0
 _SHADOW_MIN_OVERLAP_ROWS = 8
 
 # Fragment split: a 1-row x step in the envelope beyond the steepest
-# legitimate lane slope (min_slope 0.3 -> <= ~3.3 px/row) means the envelope
-# switched to a different segment, not lane curvature — fragment boundary.
+# legitimate lane slope means the envelope switched to a different segment,
+# not lane curvature — fragment boundary. The flattest line the tracker can
+# accept is one at _NOISE_X_MAX = 16 m lateral, i.e. |dy/dx| = f_y*h/(f_x*16)
+# = 0.06 with this calibration, so a lane edge could in principle run ~16
+# px/row. That bound is far too loose to be useful: in practice the INNER
+# edge of the ego lane never exceeds ~3.3 px/row on these datasets, which is
+# what 4.0 is set from. Measured, not derived — see to-do.md.
 _FRAG_MAX_STEP_PX = 4.0
 
 # Junction consistency: bridging from one fragment to the next must stay
