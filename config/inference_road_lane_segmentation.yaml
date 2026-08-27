@@ -26,7 +26,7 @@ lane_segmentation:
   track_bands: 16  # Horizontal bands for near-to-far continuity tracking (internally clamped to >= 16); independent of lane_fitting.num_bands
 
 lane_fitting:
-  num_samples: 80  # Fallback width-sample count: y-uniform legacy mode, or geometry mode when samples_per_meter is unset
+  num_samples: 80  # Fixed width-sample count, used only when samples_per_meter is unset (samples_per_meter scales with visible depth and is preferred)
   samples_per_meter: 6  # Geometry mode: width-sample density in pitch_estimation, per meter of visible depth (scene-invariant); inner-chain points are dense per-row and not affected
 
 pitch_estimation:
