@@ -16,6 +16,12 @@ dependencies = [
     "torchvision>=0.25.0",
 ]
 
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.uv.sources]
 # elsed：使用本機修補版原始碼（需先執行 python scripts/setup_elsed.py）
 pyelsed = { path = "./elsed_src" }

@@ -16,7 +16,8 @@ Monocular road pitch estimation from a single camera. The pipeline runs five seq
 - [Running the Project](#running-the-project)
   - [1. Single-Image Inference (with visualization)](#1-single-image-inference-with-visualization)
   - [2. Batch Inference on a Dataset](#2-batch-inference-on-a-dataset)
-  - [3. CARLA Real-Time Test (currently broken)](#3-carla-real-time-test-currently-broken)
+  - [3. Unit Tests](#3-unit-tests)
+  - [4. CARLA Real-Time Test (currently broken)](#4-carla-real-time-test-currently-broken)
 - [Ground Truth](#ground-truth)
 - [Configuration Reference](#configuration-reference)
 - [Critical Conventions](#critical-conventions)
@@ -106,6 +107,12 @@ mono3D-two-plane-geo/
 │   ├── env_setup.py                            # Must be called before any C extension import
 │   ├── inference_road_lane_segmentation.py     # Single-image inference + all visualizations
 │   └── batch_inference_road_lane_segmentation.py  # Batch inference → CSV + plots
+├── tests/
+│   ├── synthetic.py                            # Synthetic pinhole scenes with analytically-known answers
+│   ├── test_geometry.py                        # The projection model
+│   ├── test_pitch_estimation.py                # Metric stage against known grades
+│   ├── test_paint_evidence.py                  # Paint guards' edge cases
+│   └── test_depth_jump.py                      # Depth-continuity guard's edge cases
 ├── debug/                                      # Diagnostic and prototype scripts (not part of the pipeline)
 ├── scripts/
 │   └── setup_elsed.py                          # Clone + patch the ELSED C++ extension
@@ -262,7 +269,27 @@ Frames that produce no output are skipped and their ids printed. **A skipped fra
 
 ---
 
-### 3. CARLA Real-Time Test (currently broken)
+### 3. Unit Tests
+
+```bash
+uv run --no-sync python -m pytest
+```
+
+> ⚠ Use `--no-sync`. A plain `uv run` (or `uv sync`, or `uv add`) re-resolves the environment and replaces the CUDA build of torch with the CPU wheel the lockfile pins. If that happens, restore it with:
+> ```bash
+> uv pip install "torch==2.10.0+cu126" "torchvision==0.25.0+cu126" --index-url https://download.pytorch.org/whl/cu126
+> ```
+
+The tests are pure geometry — no images, no weights, no GPU, under two seconds. They cover two things:
+
+- **The projection model and the metric stage**, against synthetic pinhole scenes whose answer is known analytically (a road of constant grade must read back as that grade). `tests/synthetic.py` builds the scenes from the forward model the pipeline inverts.
+- **The three evidence guards' edge cases**, each of which cost a full three-dataset sweep to find: the leading-drop exception, the run-length rule, the fixed bright-peak window, and the large-row-gap case that must *not* be read as a depth jump. The docstrings name the frames.
+
+They do **not** measure accuracy. That is what the batch MAE sweep is for.
+
+---
+
+### 4. CARLA Real-Time Test (currently broken)
 
 ```bash
 python carla_module/realtime_test.py [--host HOST] [--port PORT] [--map MAP] [--timeout SEC]
