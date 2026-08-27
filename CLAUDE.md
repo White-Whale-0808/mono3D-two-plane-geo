@@ -52,6 +52,20 @@ road_segmentation → line_segmentation → lane_segmentation → lane_fitting �
 | lane_fitting | `libs/inference/lane_fitting.py` | Inner-chain extraction (`inner_chain_points`: shadowing → dense per-row inner envelope → fragments split at gaps / x-jumps → junction-consistency purge keeping the largest fragment group) → sub-pixel edge refinement on the **unmasked** image (`refine_inner_points`: nearest qualifying gradient peak ±3 px, parabola sub-pixel) → continuous gap-bridged lane curve per side (`lane_curve`) |
 | pitch_estimation | `libs/inference/pitch_estimation.py` | `estimate_pitch_from_curves`: sample lane widths from the two curves (z-uniform), inverse perspective → depth, then continuous pitch(z) via local z-window Theil-Sen slopes (`method: windowed`, default — window ±max(1 m, 0.15·z) is the explicit spatial resolution) or the global weighted spline (`method: spline`) |
 
+In **geometry mode** (all of `f_x`/`f_y`/`camera_height`/`w_real` present) the
+pipeline additionally runs the WWH-15 evidence guards; legacy mode skips them:
+
+- `libs/inference/paint_evidence.py` — photometric "is this actually paint?"
+  checks (a marking is a bright ridge of bounded width). `filter_paint_segments`
+  drops non-paint ELSED segments before tracking (kills shadow boundaries so the
+  tracker re-seeds on the true line); `truncate_at_evidence_break` cuts the
+  refined inner chain at the first sustained failure (crest-occlusion tails).
+  Thresholds are module constants with derivations in the docstring, not config.
+- `lane_fitting.truncate_at_depth_jump` — depth-continuity guard on paired-row
+  z: a jump exceeding both the continuity gate and 1.5× the local-plane
+  extrapolation marks a hidden interval (real paint beyond a crest is a
+  DISCONNECTED section and is never joined to the near chain).
+
 `lane_segmentation.py` is a single unified tracker (the older slope-dependent
 `_positive_angle.py` / `_negative_angle.py` variants have been removed). It
 runs in two modes: a **geometry-driven** mode when `f_x`, `f_y`, `w_real` and

@@ -230,6 +230,64 @@ def refine_inner_points(image_rgb, points, is_left):
     return refined
 
 
+# Depth-jump truncation: paired-row depth (z = f_x*w_real/width, one value
+# per row where BOTH chains have a real point — no continuity assumption) can
+# only jump between adjacent measured rows when the surface in between is
+# hidden (crest occlusion): the jump equals the hidden horizontal distance,
+# 10-30 m in the Town03 crests, while continuous road moves <= ~2 m per
+# paired row (measured max 1.8 m, normal frames). Guards the one case the
+# photometric gate cannot: REAL paint beyond the crest that is simply not
+# the same continuous lane line. Zero false triggers on all sampled normal
+# frames with these gates.
+_ZJUMP_ABS_M = 3.0    # minimum jump that can never be continuous road
+_ZJUMP_FRAC = 0.3     # relative gate: dz > 0.3*z at larger depths
+# Continuous-road bound across a ROW GAP: extrapolating the local plane
+# (height matched at the near pair) to the far row gives the depth a
+# continuous visible surface would reach — z_exp = z1*(y1-cy)/(y2-cy), the
+# f_y cancels. A visible continuous surface stays near it; an occlusion
+# jump far exceeds it. Without this, a legitimate 105-row pairing gap on a
+# normal frame (down_hile 209: z 2.5 -> 6.0) trips the absolute gate.
+_ZJUMP_EXTRAP_FACTOR = 1.5
+
+
+def truncate_at_depth_jump(left_points, right_points, f_x, w_real, image_height):
+    """Cut BOTH chains at the first paired-row depth jump (crest occlusion).
+
+    Rows where both chains have a point give independent per-row depths;
+    walking near to far, a jump that exceeds BOTH the continuity gate
+    max(_ZJUMP_ABS_M, _ZJUMP_FRAC*z) AND _ZJUMP_EXTRAP_FACTOR times the
+    local-plane extrapolation marks a hidden interval — everything beyond
+    belongs to a disconnected road section and must not be joined to the
+    near chain (lane_curve would bridge it). Both chains keep only rows at
+    or below the near side of the jump. Returns (left_points, right_points),
+    unchanged when no jump.
+    """
+    lp = np.asarray(left_points, dtype=np.float64)
+    rp = np.asarray(right_points, dtype=np.float64)
+    if lp.ndim != 2 or rp.ndim != 2 or len(lp) == 0 or len(rp) == 0:
+        return lp, rp
+    cy = image_height / 2.0
+    xl = {int(round(y)): x for x, y in lp}
+    xr = {int(round(y)): x for x, y in rp}
+    pairs = []                                    # (row, z), near first
+    for y in sorted(set(xl) & set(xr), reverse=True):
+        width = xr[y] - xl[y]
+        if width > 0:
+            pairs.append((y, f_x * w_real / width))
+    for (y1, z1), (y2, z2) in zip(pairs, pairs[1:]):
+        if z2 - z1 <= max(_ZJUMP_ABS_M, _ZJUMP_FRAC * z1):
+            continue
+        if y2 - cy <= 1e-6:
+            continue      # far row at/above the local horizon: no bound, stay put
+        z_exp = z1 * (y1 - cy) / (y2 - cy)
+        if z2 <= _ZJUMP_EXTRAP_FACTOR * z_exp:
+            continue      # reachable by a continuous surface across the row gap
+        # keep the near side of the jump only; rows above y1 (including
+        # unpaired single-side rows inside the gap) are unverified
+        return lp[lp[:, 1] >= y1], rp[rp[:, 1] >= y1]
+    return lp, rp
+
+
 def lane_curve(points):
     """Continuous image-space lane-line curve from inner-chain points.
 

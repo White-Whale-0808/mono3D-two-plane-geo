@@ -9,7 +9,9 @@ from libs.inference.road_segmentation import load_pidnet, predict_road, apply_ro
 from libs.inference.line_segmentation import detect_lines_with_elsed
 from libs.inference.lane_segmentation import split_left_right_lines
 from libs.visualization.lane_visualization import draw_lane_lines, create_overlay, draw_line_segments, save_lane_fitting_steps
-from libs.inference.lane_fitting import inner_chain_points, refine_inner_points, lane_curve
+from libs.inference.lane_fitting import (inner_chain_points, refine_inner_points,
+                                         lane_curve, truncate_at_depth_jump)
+from libs.inference.paint_evidence import filter_paint_segments, truncate_at_evidence_break
 from libs.visualization.lane_visualization import draw_lane_curves
 from libs.inference.pitch_estimation import estimate_pitch_from_curves
 from libs.visualization.pitch_visualization import plot_pitch_profile, plot_y3d_profile, save_pitch_estimation_steps
@@ -39,7 +41,11 @@ camera_height    = config["pitch_estimation"].get("camera_height")
 camera_offset_m  = config["pitch_estimation"].get("camera_forward_offset", 0.0)
 gt_height_source = config.get("ground_truth", {}).get("height_source", "auto")
 pitch_method     = config["pitch_estimation"].get("method", "windowed")
-measurements_csv = config["csv_io"]["measurements_csv"]
+# GT 取自影像自己的資料集（<dataset>/images/000200.png -> <dataset>/measurements.csv），
+# 不看 csv_io.measurements_csv —— 那個鍵是 batch 用的。兩邊指到不同資料集時，單張
+# 推論會把影像配上另一份資料集的同編號幀而完全不報錯（2026-08-22：down_hile 的影像
+# 配上 full_road 第 200 幀，GT 畫成一條平線，看起來像下坡 GT 算錯）。
+measurements_csv = Path(image_path).parent.parent / "measurements.csv"  # .parent 對短路徑不會爆
 
 
 def compute_pitch_mae(pitch_curve, frame_id, gt):
@@ -70,6 +76,12 @@ def main():
     Line segementation
     """
     segments = detect_lines_with_elsed(masked_road, min_segment_length_near, min_segment_length_far)
+
+    # paint-evidence segment gate (geometry mode only) — same as pipeline.py
+    geometry_mode = all(v is not None for v in (f_x, f_y, camera_height, w_real))
+    if geometry_mode and len(segments):
+        segments = filter_paint_segments(
+            resized_image, segments, f_x, f_y, camera_height, w_real)
     t2 = time.perf_counter()
 
     """
@@ -89,6 +101,13 @@ def main():
         resized_image, inner_chain_points(inner_left, True), True)
     right_points = refine_inner_points(
         resized_image, inner_chain_points(inner_right, False), False)
+    if geometry_mode:
+        left_points = truncate_at_evidence_break(
+            resized_image, left_points, True, f_x, f_y, camera_height, w_real)
+        right_points = truncate_at_evidence_break(
+            resized_image, right_points, False, f_x, f_y, camera_height, w_real)
+        left_points, right_points = truncate_at_depth_jump(
+            left_points, right_points, f_x, w_real, resized_image.height)
     left_curve = lane_curve(left_points)
     right_curve = lane_curve(right_points)
     t4 = time.perf_counter()
@@ -117,7 +136,9 @@ def main():
     print(f"pitch estimation:    {(t5-t4)*1000:.1f} ms")
 
     gt, frame_id = None, None
-    if Path(measurements_csv).exists():
+    if not measurements_csv.exists():
+        print(f"GT: skipped (no {measurements_csv})")
+    else:
         frame_id = int(Path(image_path).stem)
         gt = load_profile_gt(measurements_csv, camera_offset_m=camera_offset_m,
                              camera_height=camera_height,
