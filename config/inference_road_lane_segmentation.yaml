@@ -87,6 +87,29 @@ pitch_estimation:
   camera_height: 1.08  # Camera mount height above road (m): CAMERA_HEIGHT in carla_module/get_carlaDataset.py (the dataset collector). NOTE realtime_test.py mounts its camera at 2.4 m and overrides this. Used to derive lane_segmentation thresholds from projection geometry.
   camera_forward_offset: 1.5  # Camera mount offset AHEAD of the vehicle origin (m): the x of carla.Transform(carla.Location(x=1.5, z=CAMERA_HEIGHT)) in get_carlaDataset.py. measurements.csv records collect_dist_m / gt_pitch_deg at the VEHICLE origin, so GT lookups for a point at camera depth z must use vehicle distance z + this offset.
   method: windowed  # Pitch estimator: "windowed" (local z-window Theil-Sen, explicit spatial resolution) or "spline" (global weighted UnivariateSpline)
+  # 近場自標定：逐幀由近場地平面（相機高錨，z 2–5 m）實測 w_real，|θ0|≤0.3°
+  # 閘門擋掉近場非支撐平面的幀；採納需閘門連續通過 ≥0.5 m（反曲點單幀
+  # |θ0|≈0 是閘門盲點），保持最多 5 m（車開過量測路段即過期），其餘退回上面
+  # 的 w_real。門檻推導見 pitch_estimation.py 的 NEARFIELD_* 常數註解。
+  #
+  # 動機與驗證（2026-08-28，三路線）。獨立仲裁＝GT 正向投影的隱含寬
+  # W_implied = w_meas·z_gt/f_x，不依賴近場假設：
+  #   full_road  逐 road_id 真寬 42:3.29 / 43:3.55 / 41:3.39→3.31
+  #              （單一 3.25 在 road 43 是 z 尺度 −8%）
+  #   down_hile  真寬 3.336，近場估計 3.328 → **誤差 8 mm**
+  #   uphile     真寬 3.254，近場估計偏 +0.05（持續坡的殘餘 θ0）
+  # 批次 MAE：full_road 0.2072→0.2112、uphile 0.2500→0.2436、
+  #           down_hile 0.3010→0.3204。
+  #
+  # ⚠ down_hile 那條「退步」不代表估計錯：該路段量到的 3.328 對真值只差
+  # 8 mm，MAE 卻偏好錯的 3.25 —— 正是上方 w_real 的 DO NOT tune 段所述、
+  # MAE 最優點系統性偏低的現象（三條路線一致：w 越小 MAE 越好）。
+  #
+  # 預設 false：持續坡上車身相對路面有方向性俯仰（±0.12°），θ0 被推到閘門
+  # 邊緣，80–95% 的幀退回 fallback，功能發揮有限而 down_hile 會退步。等
+  # θ0 修正（改用 Theil-Sen 截距 w_real_z0，本來就是 θ0-free）做完再重跑
+  # 驗收，屆時再決定是否改 true。批次可用 --nearfield / --no-nearfield 覆寫。
+  nearfield_w_real: false
 
 # GT 不是 pipeline 的一個階段，是評估用的參考值，所以自成一區
 ground_truth:
