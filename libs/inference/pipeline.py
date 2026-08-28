@@ -36,6 +36,7 @@ def infer_one(
     samples_per_meter: float = None,
     track_bands: int = 16,
     method: str = "windowed",
+    w_real_calibrator=None,
     return_debug: bool = False,
 ):
     """Run the full pipeline on a single image.
@@ -45,6 +46,12 @@ def infer_one(
     f_x, f_y, w_real, camera_height
         Camera calibration. Required — the tracker's thresholds and the
         paint-evidence probe windows are all derived from it.
+    w_real_calibrator
+        Optional pitch_estimation.NearfieldWidthCalibrator (one instance per
+        image sequence). When given, the metric stage uses its per-frame
+        near-field width instead of the configured w_real; stages 1-4 keep
+        the configured value for threshold derivation either way. The value
+        actually used is returned as "w_real_used".
     return_debug
         If True, also return a dict with intermediate values.
     """
@@ -88,13 +95,16 @@ def infer_one(
     right_curve = lane_curve(right_points)
 
     # 5. pitch estimation — widths from the curves → continuous pitch(z)
-    # (`method` selects windowed Theil-Sen, the default, or the global spline)
+    # (`method` selects windowed Theil-Sen, the default, or the global spline).
+    # The metric scale is the calibrator's near-field width when one is given.
+    w_real_metric = (w_real_calibrator.update(left_curve, right_curve)
+                     if w_real_calibrator is not None else w_real)
     pitch_curve = estimate_pitch_from_curves(
-        left_curve, right_curve, f_x, f_y, resized_image.height, w_real,
+        left_curve, right_curve, f_x, f_y, resized_image.height, w_real_metric,
         num_samples=num_samples, samples_per_meter=samples_per_meter,
         method=method)
 
-    result = {"pitch_curve": pitch_curve}
+    result = {"pitch_curve": pitch_curve, "w_real_used": w_real_metric}
     if return_debug:
         degenerate = pitch_curve["pitch_at"] is None or len(pitch_curve["z_samples"]) == 0
         result["debug"] = {
@@ -103,5 +113,7 @@ def infer_one(
             "n_right": len(inner_right),
             "n_width_samples": int(len(pitch_curve["widths"])),
             "pitch_degenerate": degenerate,
+            "left_curve": left_curve,
+            "right_curve": right_curve,
         }
     return result

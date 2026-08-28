@@ -51,6 +51,31 @@ def road_points(pitch_deg=0.0, z_near=10.0, z_far=30.0, n=200,
     return left, right
 
 
+def nearfield_widths(theta0_deg=0.0, z_near=2.0, z_far=5.0, n=60,
+                     f_x=F_X, f_y=F_Y, camera_height=CAM_H, w_real=W_REAL,
+                     image_height=IMG_H):
+    """(y, w_px) rows of the vehicle support plane, camera pitched down θ0.
+
+    Exact rotation, not the small-angle model the estimator inverts — so the
+    estimator's linearisation error is part of what a test measures. The
+    support plane is at y=+h (y-down) and Z runs along it; camera-frame
+    coordinates of a ground point at forward distance Z are
+
+        y_c = h·cosθ0 − Z·sinθ0        z_c = h·sinθ0 + Z·cosθ0
+
+    (θ0 > 0 = pitched down: the horizon row cy − f_y·tanθ0 rises). Width is
+    lateral, unchanged by the pitch rotation: w_px = f_x·w_real/z_c.
+    At θ0 = 0 this reduces to row_for_depth / width_for_depth exactly.
+    """
+    th = np.radians(theta0_deg)
+    Z = np.linspace(z_near, z_far, n)
+    y_c = camera_height * np.cos(th) - Z * np.sin(th)
+    z_c = camera_height * np.sin(th) + Z * np.cos(th)
+    y = image_height / 2.0 + f_y * y_c / z_c
+    w_px = f_x * w_real / z_c
+    return np.column_stack([y, w_px])
+
+
 def row_for_depth(z, f_y=F_Y, camera_height=CAM_H, image_height=IMG_H):
     """Image row a flat road at depth z projects to."""
     return image_height / 2.0 + f_y * camera_height / z
