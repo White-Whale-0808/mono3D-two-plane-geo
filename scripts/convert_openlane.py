@@ -160,8 +160,13 @@ def warp_image(src_path, dst_path, K_src):
     return True
 
 
-def convert_segment(seg_dir, out_dir, image_root, accept, want_images):
-    """轉一個 segment；回傳寫出的幀數。"""
+def convert_segment(seg_dir, out_dir, image_root, accept, want_images,
+                    keep=None):
+    """轉一個 segment；回傳寫出的幀數。
+
+    ``keep`` 若給定，只轉 (segment, frame_stem) 在集合裡的幀（分層實驗用）。
+    里程 ``travelled`` 仍累加**所有**幀，所以 collect_dist_m 不受篩選影響。
+    """
     seg_dir, out_dir = Path(seg_dir), Path(out_dir)
     rows, profile_rows = [], []
     travelled, prev_pos = 0.0, None
@@ -180,6 +185,8 @@ def convert_segment(seg_dir, out_dir, image_root, accept, want_images):
             travelled += float(np.linalg.norm(pos - prev_pos))
         prev_pos = pos
 
+        if keep is not None and (seg_dir.name, path.stem) not in keep:
+            continue
         got = frame_record(data, accept)
         if got is None:
             continue
@@ -237,10 +244,22 @@ def main(argv=None):
     ap.add_argument('--no-images', action='store_true',
                     help='只轉標註，不處理影像（影像還沒下載時用）')
     ap.add_argument('--limit-segments', type=int, default=None)
+    ap.add_argument('--frame-list', type=Path, default=None,
+                    help='CSV（需有 segment / frame 欄），只轉列出的幀；'
+                         '分層實驗用，見 debug/openlane_frame_tags.py')
     args = ap.parse_args(argv)
 
     accept = SOLID if args.mode == 'solid' else PAINT
+    keep = None
+    if args.frame_list:
+        fl = pd.read_csv(args.frame_list, dtype={'frame': str})
+        keep = set(zip(fl['segment'], fl['frame']))
+        print('frame-list: %d frames / %d segments'
+              % (len(keep), fl['segment'].nunique()))
     segments = sorted((args.openlane / args.split).glob('segment-*'))
+    if keep is not None:
+        wanted = {s for s, _ in keep}
+        segments = [s for s in segments if s.name in wanted]
     if args.limit_segments:
         segments = segments[:args.limit_segments]
 
@@ -248,7 +267,7 @@ def main(argv=None):
     kept_segments = 0
     for seg in segments:
         n = convert_segment(seg, args.out / seg.name, args.openlane,
-                            accept, not args.no_images)
+                            accept, not args.no_images, keep)
         if n:
             kept_segments += 1
             total += n
