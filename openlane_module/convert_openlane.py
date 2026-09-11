@@ -38,11 +38,11 @@ pipeline 與 GT 模組**完全不用改**，靠三個轉換達成：
 用法::
 
     # 只轉標註（不需要影像，可先驗證 GT 串接）
-    python scripts/convert_openlane.py --openlane D:/datasets/openlane \\
+    python openlane_module/convert_openlane.py --openlane D:/datasets/openlane \\
         --out D:/datasets/openlane_converted --no-images --limit-segments 3
 
     # 影像解開後連影像一起轉
-    python scripts/convert_openlane.py --openlane D:/datasets/openlane \\
+    python openlane_module/convert_openlane.py --openlane D:/datasets/openlane \\
         --out D:/datasets/openlane_converted
 """
 import argparse
@@ -267,7 +267,7 @@ def main(argv=None):
     ap.add_argument('--limit-segments', type=int, default=None)
     ap.add_argument('--frame-list', type=Path, default=None,
                     help='CSV（需有 segment / frame 欄），只轉列出的幀；'
-                         '分層實驗用，見 debug/openlane_frame_tags.py')
+                         '分層實驗用，見 openlane_module/frame_tags.py')
     args = ap.parse_args(argv)
 
     accept = SOLID if args.mode == 'solid' else PAINT
