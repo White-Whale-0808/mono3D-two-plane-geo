@@ -71,8 +71,11 @@ reused — which is what the geometry path does automatically.
 # the re-derivation from road geometry.
 _TOL_X_M             = 0.325  # association tol as a lateral distance
 _TOL_PX_FLOOR        = 3.0    # ELSED endpoint noise floor (px)
-_CROSS_X_M           = 1.30   # never search this far to the side: the cap that
-                              # stops association crossing into the next lane
+_CROSS_LANE_FRACTION = 0.40   # association may not search beyond this fraction
+                              # of the MEASURED lane width toward the next lane.
+                              # A ratio, not a distance: the width it scales is
+                              # measured per frame (_measure_lane_width_m), so
+                              # nothing here assumes how wide this road is.
 _SLOPE_GATE_X_M      = 3.25   # noise slope gate: |dy/dx| of a line this far aside.
                               # This is the one lateral scale that CANNOT be
                               # measured instead of assumed: it runs in
@@ -233,7 +236,42 @@ def _find_seed(infos, selected, is_left, center_x,
     return None, -1
 
 
-def _track_side(infos, is_left, center_x, track_bands, geom):
+def _measure_lane_width_m(infos, center_x, band_edges, track_bands, geom):
+    """Lane width in METRES, measured from the first seed on each side.
+
+    The seed rule is innermost-first and needs no width of its own, so this is
+    a bootstrap WITHIN one frame — seed, measure, then track — not a
+    cross-frame feedback loop, and it cannot diverge.
+
+    Driving in lane puts the camera between the two markings, so the width is
+    the sum of the two lateral offsets, each evaluated at its OWN seed row.
+    Summing per-side offsets instead of differencing two x values at a shared
+    row is what removes the extrapolation: neither side is ever evaluated at a
+    row its own seed does not cover. One side alone gives 2x its offset, the
+    ego being roughly centred.
+
+    Returns None when neither side seeds. The caller then leaves the
+    cross-lane cap OFF rather than substituting an assumed width — a guess
+    would be exactly the failure this function exists to remove.
+    """
+    halves = []
+    for is_left in (True, False):
+        items, band = _find_seed(infos, {}, is_left, center_x, band_edges,
+                                 track_bands - 1, geom, True)
+        if items is None:
+            continue
+        y_c = (band_edges[band] + band_edges[band + 1]) / 2.0
+        if not geom.z_valid(y_c):
+            continue
+        xs = [_x_on_segment_line(i, y_c) for i in items]
+        x_inner = max(xs) if is_left else min(xs)
+        halves.append(abs(x_inner - center_x) * geom.z_at(y_c) / geom.f_x)
+    if not halves:
+        return None
+    return sum(halves) if len(halves) == 2 else 2.0 * halves[0]
+
+
+def _track_side(infos, is_left, center_x, track_bands, geom, lane_m):
     """Seed at the bottom, track upward by continuity; re-seed past dead ends."""
     sign = -1.0 if is_left else 1.0
     y_lo = min(i["y_min"] for i in infos)
@@ -255,7 +293,9 @@ def _track_side(infos, is_left, center_x, track_bands, geom):
         # tolerance scale: worst-case uphill (largest pixel scale there);
         # cross-lane cap: worst-case flat (other lane closest in pixels).
         base = max(_TOL_PX_FLOOR, geom.px_max_at(_TOL_X_M, y))
-        cap = max(_TOL_PX_FLOOR, geom.px_at(_CROSS_X_M, y))
+        if lane_m is None:
+            return base * (1.0 + missed)      # unmeasurable: no cap, no guess
+        cap = max(_TOL_PX_FLOOR, geom.px_at(_CROSS_LANE_FRACTION * lane_m, y))
         return min(cap, base * (1.0 + missed))
 
     def group_tol(y):
@@ -421,7 +461,18 @@ def split_left_right_lines(
     center_x = image_width / 2
     track_bands = max(int(track_bands), 16)
 
-    inner_left = _track_side(infos, True, center_x, track_bands, geom)
-    inner_right = _track_side(infos, False, center_x, track_bands, geom)
+    # Measure this road's lane width from the seeds before tracking, so the
+    # cross-lane cap scales with the road in front of the camera rather than
+    # with a number carried over from whichever dataset it was tuned on.
+    y_lo = min(i["y_min"] for i in infos)
+    y_hi = max(i["y_max"] for i in infos)
+    lane_m = None
+    if y_hi - y_lo >= 1:
+        band_edges = np.linspace(y_lo, y_hi, track_bands + 1)
+        lane_m = _measure_lane_width_m(infos, center_x, band_edges,
+                                       track_bands, geom)
+
+    inner_left = _track_side(infos, True, center_x, track_bands, geom, lane_m)
+    inner_right = _track_side(infos, False, center_x, track_bands, geom, lane_m)
 
     return inner_left, inner_right
