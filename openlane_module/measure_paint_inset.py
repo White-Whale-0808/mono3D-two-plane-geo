@@ -66,8 +66,17 @@ MIN_CONTRAST = 8.0                     # 峰值 − 背景的下限（gray level
 
 
 def _gray(img):
+    """Luma of an RGB image.
+
+    Both callers flip the cv2 BGR frame with [:, :, ::-1] before calling, so the
+    input is RGB and the weights must be R,G,B = 0.299, 0.587, 0.114 — the same
+    as paint_evidence._gray. This used to carry the BGR order, which swapped red
+    and blue: yellow paint (high R, almost no B) lost most of its contrast, so
+    yellow-line rows were either rejected by MIN_CONTRAST or had their edges
+    misplaced. White lines were barely affected.
+    """
     g = np.asarray(img, dtype=np.float32)
-    return g @ np.array([0.114, 0.587, 0.299], np.float32) if g.ndim == 3 else g
+    return g @ np.array([0.299, 0.587, 0.114], np.float32) if g.ndim == 3 else g
 
 
 def paint_group_edges(gray, v, u0, px_per_m, inner_sign):

@@ -152,6 +152,9 @@ def main(argv=None):
     print(f"{len(df)} frames / {df.segment.nunique()} segments -> {args.out}")
 
     ta = tier_a(df)
+    # mkdir before the write, not before the scan: a missing folder used to
+    # surface only here, after the whole OpenLane pass had already run
+    args.tier_a_out.parent.mkdir(parents=True, exist_ok=True)
     ta.to_csv(args.tier_a_out, index=False)
     print(f"Tier A: {len(ta)} frames / {ta.segment.nunique()} segments "
           f"-> {args.tier_a_out}")
