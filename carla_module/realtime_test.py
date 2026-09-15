@@ -158,7 +158,7 @@ def run_pipeline(
     # 階段 3：左右車道分類
     inner_left, inner_right = split_left_right_lines(
         segments, image_width=resized_image.width, img_height=resized_image.height, f_x=f_x,
-        f_y=f_y, w_real=w_real, camera_height=cfg["pitch_estimation"].get("camera_height", 2.4))
+        f_y=f_y, camera_height=cfg["pitch_estimation"].get("camera_height", 2.4))
 
     # 車道線不足時（路口、遮蔽等），回傳空結果
     if not inner_left or not inner_right:

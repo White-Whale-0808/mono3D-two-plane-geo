@@ -73,7 +73,7 @@ def infer_one(
     inner_left, inner_right = split_left_right_lines(
         segments, resized_image.width, resized_image.height,
         track_bands=track_bands,
-        f_x=f_x, f_y=f_y, camera_height=camera_height, w_real=w_real)
+        f_x=f_x, f_y=f_y, camera_height=camera_height)
 
     # 4. lane fitting — per-row inner-envelope chain (w_real is inner-edge
     # to inner-edge; the tracker keeps whole marking groups for evidence),

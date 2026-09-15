@@ -87,7 +87,7 @@ def main():
     inner_left, inner_right = split_left_right_lines(
         segments, resized_image.width, resized_image.height,
         track_bands=track_bands,
-        f_x=f_x, f_y=f_y, camera_height=camera_height, w_real=w_real)
+        f_x=f_x, f_y=f_y, camera_height=camera_height)
     t3 = time.perf_counter()
 
     """

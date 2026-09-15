@@ -74,13 +74,26 @@ class CameraGeometry:
                 "(built via without_lane_width); lane_px/lane_px_max need it")
         return self.w
 
+    def px_at(self, x_m, y):
+        """Pixel offset of a LATERAL distance x_m (metres) at row y, flat road.
+
+        x - cx = f_x*X/z, so every threshold that is really "a distance to
+        the side of the camera axis" has an exact pixel form at each row.
+        This is the primitive; lane_px below is just the case X = one lane.
+        """
+        return self.f_x * x_m / self.z_at(y)
+
+    def px_max_at(self, x_m, y):
+        """Upper bound of that offset at row y (worst-case uphill grade)."""
+        return self.f_x * x_m / self.z_min(y)
+
     def lane_px(self, y):
         """Nominal (flat-ground) pixel width of one real lane at row y."""
-        return self.f_x * self._require_w() / self.z_at(y)
+        return self.px_at(self._require_w(), y)
 
     def lane_px_max(self, y):
         """Upper bound of the lane pixel width at row y (worst-case uphill)."""
-        return self.f_x * self._require_w() / self.z_min(y)
+        return self.px_max_at(self._require_w(), y)
 
     def z_valid(self, y):
         """True when flat-ground z(y) is not saturated by the horizon clamp."""

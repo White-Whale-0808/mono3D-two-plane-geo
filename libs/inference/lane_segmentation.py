@@ -19,11 +19,16 @@ Parameter derivation (see docs/papers/lane_segmentation_design_logic.drawio):
   and a lane line at lateral offset X has image slope dy/dx = f_y*h/(f_x*X).
 
   This lets us derive, instead of hand-tuning:
-    - association tolerance  ~ fraction of the local lane pixel width
-    - cross-lane safety cap  ~ 0.4 lane width in pixels at that row
-    - seed x-window          ~ ego sits within its lane: X in (0.5±δ)·w_real
+    - association tolerance  ~ a lateral distance to the side (_TOL_X_M)
+    - cross-lane safety cap  ~ the lateral distance association may not cross
+    - seed x-window          ~ the lateral band the ego's own marking lies in
     - noise slope gate       ~ |dy/dx| of a line 16 m to the side
     - model memory / reset   ~ expressed in metres via z(y)
+
+  Note what is NOT needed: the lane WIDTH. Every threshold above is a lateral
+  distance, and w_real only ever served to convert "a fraction of a lane" into
+  metres. Stating the metres directly is what lets this stage run on a road of
+  unknown width.
 
   z(y) is a flat-ground approximation; on the second plane it drifts, so
   (y - cy) is clamped and band-count fallbacks are kept as safety nets.
@@ -37,11 +42,24 @@ reused — which is what the geometry path does automatically.
 """
 
 # Geometry constants (metres / fractions with physical meaning)
-_TOL_LANE_FRACTION   = 0.10   # association tol = 10% of local lane width
+# Every threshold below is a LATERAL DISTANCE IN METRES, projected to pixels
+# at each row by geom.px_at / px_max_at. They used to be written as fractions
+# of w_real, which made the tracker look like it needed to know the lane width
+# -- it does not: what it needs is how far to the side to look, and that is a
+# property of driving, not of this road's markings. Measured over three routes
+# (254 frames, assumed width swept 2.60-4.40 m): >=95% of frames produce
+# BIT-IDENTICAL lane curves and the lateral positions never move at all, so a
+# fixed distance costs nothing that a per-road width would buy. Values here are
+# the exact equivalents of the old w_real=3.25 forms; see the git history for
+# the re-derivation from road geometry.
+_TOL_X_M             = 0.325  # association tol as a lateral distance
 _TOL_PX_FLOOR        = 3.0    # ELSED endpoint noise floor (px)
-_CROSS_LANE_FRACTION = 0.40   # never search beyond 40% of a lane width
-_SEED_DELTA          = 0.5    # ego lateral position uncertainty (lane fractions)
-                              # = max lateral offset / w_real = (w_real/2) / w_real
+_CROSS_X_M           = 1.30   # never search this far to the side: the cap that
+                              # stops association crossing into the next lane
+_SEED_X_LO_M         = 0.0    # seed window, near edge (ego may straddle the line)
+_SEED_X_HI_M         = 3.25   # seed window, far edge
+_SLOPE_GATE_X_M      = 3.25   # noise slope gate: |dy/dx| of a line this far aside
+_ROI_X_M             = 3.25   # segment mid_x must lie within this of the axis
 _SEED_X_MAX          = 8.0    # seed slope gate: lines beyond 8 m lateral are noise
 _NOISE_X_MAX         = 16.0   # prefilter slope gate: beyond 16 m lateral
 _MODEL_MEMORY_M      = 4.0    # local model fits points within 4 m of depth
@@ -59,11 +77,11 @@ from libs.inference.geometry import CameraGeometry as _Geometry
 
 def _segment_info(segments, geom):
     """Precompute per-segment geometry; drop only clearly-horizontal noise."""
-    # slope gate: dy/dx of a line at the inner lane edge with maximum
-    # vehicle lateral offset (X = w_real/2 + 0.5*w_real = w_real).
-    # Anything flatter cannot be a lane line under normal driving —
-    # filters stop lines and crosswalks which have dy/dx ≈ 0.
-    slope_gate = geom.f_y * geom.h / (geom.f_x * geom.w)
+    # slope gate: dy/dx of a line _SLOPE_GATE_X_M to the side (a lane line at
+    # lateral X has image slope f_y*h/(f_x*X)). Anything flatter cannot be a
+    # lane line under normal driving — filters stop lines and crosswalks,
+    # which have dy/dx ≈ 0.
+    slope_gate = geom.f_y * geom.h / (geom.f_x * _SLOPE_GATE_X_M)
 
     infos = []
     for seg in np.asarray(segments, dtype=np.float64):
@@ -79,11 +97,11 @@ def _segment_info(segments, geom):
         if np.isfinite(slope) and abs(slope) < slope_gate:
             continue
 
-        # ROI filter: segment mid_x must be within one lane width of image
-        # centre. Uses lane_px_max (uphill worst-case) so valid lane lines are
+        # ROI filter: segment mid_x must be within _ROI_X_M of the image
+        # centre. Uses the uphill worst-case bound so valid lane lines are
         # never excluded on ascending sections.
-        # TODO: replace 1.0 multiplier with p95 lateral offset from CARLA GT.
-        if abs(mid_x - geom.cx) > geom.lane_px_max(mid_y):
+        # TODO: re-derive _ROI_X_M from the p95 lateral offset in CARLA GT.
+        if abs(mid_x - geom.cx) > geom.px_max_at(_ROI_X_M, mid_y):
             continue
 
         infos.append({
@@ -172,16 +190,16 @@ def _find_seed(infos, selected, is_left, center_x,
         if not geom.z_valid(y_c):
             continue
 
-        # Ego sits somewhere inside its lane: the inner marking lies at
-        # lateral X in (0.5±δ)·w_real. The pixel window is evaluated with
-        # z_min (worst-case uphill) so it stays wide enough on slopes.
-        inner = geom.f_x * geom.w * (0.5 - _SEED_DELTA) / geom.z_min(y_c)
-        outer = geom.f_x * geom.w * (0.5 + _SEED_DELTA) / geom.z_min(y_c)
+        # Ego sits somewhere inside its lane, so the inner marking lies at a
+        # lateral X anywhere in [_SEED_X_LO_M, _SEED_X_HI_M]. Evaluated with
+        # the uphill worst-case bound so the window stays wide on slopes.
+        inner = geom.px_max_at(_SEED_X_LO_M, y_c)
+        outer = geom.px_max_at(_SEED_X_HI_M, y_c)
         if is_left:
             x_lo, x_hi = center_x - outer, center_x - inner
         else:
             x_lo, x_hi = center_x + inner, center_x + outer
-        group_tol = max(_TOL_PX_FLOOR, _TOL_LANE_FRACTION * geom.lane_px_max(y_c))
+        group_tol = max(_TOL_PX_FLOOR, geom.px_max_at(_TOL_X_M, y_c))
 
         cands = []
         for info in infos:
@@ -222,18 +240,19 @@ def _track_side(infos, is_left, center_x, track_bands, geom):
     def assoc_window(y, missed):
         """Search half-width around the prediction at row y.
 
-        lane_px_max keeps the window wide enough on uphill rows; the
-        cross-lane cap uses the same scale, preserving the 4x headroom.
+        The uphill worst-case bound keeps the window wide enough on
+        ascending rows; the cross-lane cap uses the flat-ground scale,
+        preserving the 4x headroom between the two.
         """
         # tolerance scale: worst-case uphill (largest pixel scale there);
         # cross-lane cap: worst-case flat (other lane closest in pixels).
-        base = max(_TOL_PX_FLOOR, _TOL_LANE_FRACTION * geom.lane_px_max(y))
-        cap = max(_TOL_PX_FLOOR, _CROSS_LANE_FRACTION * geom.lane_px(y))
+        base = max(_TOL_PX_FLOOR, geom.px_max_at(_TOL_X_M, y))
+        cap = max(_TOL_PX_FLOOR, geom.px_at(_CROSS_X_M, y))
         return min(cap, base * (1.0 + missed))
 
     def group_tol(y):
         """Same-physical-marking grouping width."""
-        return max(_TOL_PX_FLOOR, _TOL_LANE_FRACTION * geom.lane_px_max(y))
+        return max(_TOL_PX_FLOOR, geom.px_max_at(_TOL_X_M, y))
 
     selected = {}
     sections = []  # per seed: {"segs": [...], "first": bool, "extra_bands": int}
@@ -357,7 +376,6 @@ def split_left_right_lines(
     f_x: float,
     f_y: float,
     camera_height: float,
-    w_real: float,
 ):
     """Split ELSED segments into inner left / right lane segments.
 
@@ -370,10 +388,12 @@ def split_left_right_lines(
         Tracking band count (internally clamped to >= 16). Independent of
         lane_fitting's num_bands — tracking steps and fitting knots are
         separate concepts.
-    f_x, f_y, camera_height, w_real : float, keyword-only, REQUIRED
-        Camera focal lengths (px), camera height above road (m) and real lane
-        width (m). Association tolerance, seed window, slope gates and model
-        memory are all derived from these; there is no un-calibrated mode.
+    f_x, f_y, camera_height : float, keyword-only, REQUIRED
+        Camera focal lengths (px) and camera height above road (m).
+        Association tolerance, seed window, slope gates and model memory are
+        all derived from these; there is no un-calibrated mode. The lane WIDTH
+        is deliberately not taken: every threshold here is a lateral distance
+        in metres, so the tracker works on a road whose width it does not know.
 
     Returns
     -------
@@ -383,7 +403,8 @@ def split_left_right_lines(
     if segments.size == 0:
         return [], []
 
-    geom = _Geometry(f_x, f_y, camera_height, w_real, image_width, img_height)
+    geom = _Geometry.without_lane_width(f_x, f_y, camera_height,
+                                        image_width, img_height)
 
     infos = _segment_info(segments, geom)
     if not infos:
