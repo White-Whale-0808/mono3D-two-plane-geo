@@ -234,14 +234,17 @@ def run_carla(args):
             cv = dbg.get(key)
             if not (isinstance(cv, dict) and len(cv.get('y', ()))):
                 continue
-            # 曲線是逐列的 {'y': 列, 'x': 內緣欄}；只取最近的幾列，那裡漆最寬
+            # 曲線是逐列的 {'y': 列, 'x': 內緣欄}；取量測深度範圍內最近的幾列，那裡漆最寬。
+            # ⚠ 必須先限定 z 再取最近的列，順序不能反：左線的內緣鏈常一路延伸到影像
+            # 底部（z ≈ 1.9 m），若先取最近 40 列再過濾 z >= 3，40 列會全部被刷掉 ——
+            # 雙黃線那一側因此從來沒產生過任何一筆，驗證只驗到了單白線。
             pts = np.column_stack([np.asarray(cv['x'], float),
                                    np.asarray(cv['y'], float)])
+            zs = f_y * cam_h / np.maximum(pts[:, 1] - resize[0] / 2.0, 1e-6)
+            pts = pts[(zs >= 3.0) & (zs <= 12.0)]
             pts = pts[np.argsort(-pts[:, 1])][:40]
             for u_edge, v in pts[::8]:
                 z = f_y * cam_h / max(v - resize[0] / 2.0, 1e-6)
-                if not (3.0 <= z <= 12.0):
-                    continue
                 got = paint_group_edges(gray, v, u_edge, f_x / z, sign)
                 if got is None:
                     continue
@@ -302,7 +305,14 @@ def main():
             import yaml as _yaml
             _fx = _yaml.safe_load(open('config/inference_road_lane_segmentation.yaml',
                                        encoding='utf-8'))['pitch_estimation']['f_x']
-            blur_diagnostic(df, _fx, "（CARLA）")
+            # Per side: the two sides carry different true widths (single white
+            # 0.125, double yellow 0.375) at different depth mixes, so one pooled
+            # group_m-vs-z fit measures the side mix, not blur. It only looked
+            # sane before because the left side never produced a single row.
+            for _side in ("left", "right"):
+                _d = df[df.side == _side]
+                if len(_d) >= 3:
+                    blur_diagnostic(_d, _fx, f"（CARLA {_side}）")
             print("\n真值：右側單白 0.125 m、左側雙黃 2×0.125＋間隙 ≈ 0.375 m")
         return
 
