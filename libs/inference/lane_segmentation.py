@@ -21,7 +21,6 @@ Parameter derivation (see docs/papers/lane_segmentation_design_logic.drawio):
   This lets us derive, instead of hand-tuning:
     - association tolerance  ~ a lateral distance to the side (_TOL_X_M)
     - cross-lane safety cap  ~ the lateral distance association may not cross
-    - seed x-window          ~ the lateral band the ego's own marking lies in
     - noise slope gate       ~ |dy/dx| of a line 16 m to the side
     - model memory / reset   ~ expressed in metres via z(y)
 
@@ -29,6 +28,24 @@ Parameter derivation (see docs/papers/lane_segmentation_design_logic.drawio):
   distance, and w_real only ever served to convert "a fraction of a lane" into
   metres. Stating the metres directly is what lets this stage run on a road of
   unknown width.
+
+  Two further thresholds used to live here and are gone, because disabling
+  them left the output BIT-IDENTICAL on 288 frames across two datasets and
+  two cameras (CARLA Town03 120, OpenLane Tier A 168 / 16 segments):
+
+    - ROI corridor (segment mid_x within one lane width of the axis):
+      never rejected anything that mattered on either dataset.
+    - seed x-window outer bound: selection is innermost-first, so an outer
+      bound can only discard a far candidate that would have been picked
+      when nothing nearer existed — its only effect was losing a seed.
+      The side test it also carried is kept, inline.
+
+  The slope gate, measured the same way, is the opposite case and stays:
+  disabling it costs 2 whole frames and 14.65 m of median range on the
+  OpenLane footage. It looked removable on CARLA (6 frames touched, range
+  slightly BETTER without it) because those three routes have almost no
+  junctions — a gate that rejects stop lines and crosswalks cannot be
+  evaluated on roads that have none.
 
   z(y) is a flat-ground approximation; on the second plane it drifts, so
   (y - cy) is clamped and band-count fallbacks are kept as safety nets.
@@ -56,10 +73,12 @@ _TOL_X_M             = 0.325  # association tol as a lateral distance
 _TOL_PX_FLOOR        = 3.0    # ELSED endpoint noise floor (px)
 _CROSS_X_M           = 1.30   # never search this far to the side: the cap that
                               # stops association crossing into the next lane
-_SEED_X_LO_M         = 0.0    # seed window, near edge (ego may straddle the line)
-_SEED_X_HI_M         = 3.25   # seed window, far edge
-_SLOPE_GATE_X_M      = 3.25   # noise slope gate: |dy/dx| of a line this far aside
-_ROI_X_M             = 3.25   # segment mid_x must lie within this of the axis
+_SLOPE_GATE_X_M      = 3.25   # noise slope gate: |dy/dx| of a line this far aside.
+                              # This is the one lateral scale that CANNOT be
+                              # measured instead of assumed: it runs in
+                              # _segment_info, before any line has been found.
+                              # Load-bearing — disabling it on urban footage
+                              # loses whole frames (see the module docstring).
 _SEED_X_MAX          = 8.0    # seed slope gate: lines beyond 8 m lateral are noise
 _NOISE_X_MAX         = 16.0   # prefilter slope gate: beyond 16 m lateral
 _MODEL_MEMORY_M      = 4.0    # local model fits points within 4 m of depth
@@ -95,13 +114,6 @@ def _segment_info(segments, geom):
         mid_x = (x1 + x2) / 2
 
         if np.isfinite(slope) and abs(slope) < slope_gate:
-            continue
-
-        # ROI filter: segment mid_x must be within _ROI_X_M of the image
-        # centre. Uses the uphill worst-case bound so valid lane lines are
-        # never excluded on ascending sections.
-        # TODO: re-derive _ROI_X_M from the p95 lateral offset in CARLA GT.
-        if abs(mid_x - geom.cx) > geom.px_max_at(_ROI_X_M, mid_y):
             continue
 
         infos.append({
@@ -190,15 +202,11 @@ def _find_seed(infos, selected, is_left, center_x,
         if not geom.z_valid(y_c):
             continue
 
-        # Ego sits somewhere inside its lane, so the inner marking lies at a
-        # lateral X anywhere in [_SEED_X_LO_M, _SEED_X_HI_M]. Evaluated with
-        # the uphill worst-case bound so the window stays wide on slopes.
-        inner = geom.px_max_at(_SEED_X_LO_M, y_c)
-        outer = geom.px_max_at(_SEED_X_HI_M, y_c)
-        if is_left:
-            x_lo, x_hi = center_x - outer, center_x - inner
-        else:
-            x_lo, x_hi = center_x + inner, center_x + outer
+        # The seed must lie on this side of the camera axis, and that is the
+        # WHOLE constraint: there used to be an outer bound at one lane width
+        # too, but selection below is innermost-first, so an outer bound can
+        # only ever discard a far candidate that would have been picked when
+        # nothing nearer existed. Its only moment of effect was losing a seed.
         group_tol = max(_TOL_PX_FLOOR, geom.px_max_at(_TOL_X_M, y_c))
 
         cands = []
@@ -210,7 +218,7 @@ def _find_seed(infos, selected, is_left, center_x,
             if not is_seed_candidate(info):
                 continue
             x_c = _x_on_segment_line(info, y_c)
-            if not (x_lo <= x_c <= x_hi):
+            if (x_c > center_x) if is_left else (x_c < center_x):
                 continue
             cands.append((x_c, info))
         if cands:
