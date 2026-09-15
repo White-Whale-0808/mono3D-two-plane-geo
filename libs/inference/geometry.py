@@ -32,7 +32,7 @@ class CameraGeometry:
         self.f_x = float(f_x)
         self.f_y = float(f_y)
         self.h = float(camera_height)
-        self.w = float(w_real)
+        self.w = float(w_real) if w_real is not None else None
         self.cx = image_width / 2.0
         self.cy = img_height / 2.0
         self.min_dy = min_y_margin * img_height  # clamp near/above horizon
@@ -54,13 +54,33 @@ class CameraGeometry:
         w = min(max((z_flat - _GRADE_RAMP_Z0) / _GRADE_RAMP_SPAN, 0.0), 1.0)
         return self.f_y * self.h / max(y - self.cy + w * self.grade_dy, self.min_dy)
 
+    @classmethod
+    def without_lane_width(cls, f_x, f_y, camera_height,
+                           image_width, img_height, min_y_margin=0.05):
+        """Geometry for callers that only need depth (z_at / z_min / z_valid).
+
+        Those are f_y*h/(y-cy) — the lane width never enters. lane_px and
+        lane_px_max are the only members that need it, and they raise here.
+        Constructing without it keeps the fact visible at the call site
+        instead of passing a value that is silently never read.
+        """
+        return cls(f_x, f_y, camera_height, None,
+                   image_width, img_height, min_y_margin)
+
+    def _require_w(self):
+        if self.w is None:
+            raise ValueError(
+                "lane width was not supplied to CameraGeometry "
+                "(built via without_lane_width); lane_px/lane_px_max need it")
+        return self.w
+
     def lane_px(self, y):
         """Nominal (flat-ground) pixel width of one real lane at row y."""
-        return self.f_x * self.w / self.z_at(y)
+        return self.f_x * self._require_w() / self.z_at(y)
 
     def lane_px_max(self, y):
         """Upper bound of the lane pixel width at row y (worst-case uphill)."""
-        return self.f_x * self.w / self.z_min(y)
+        return self.f_x * self._require_w() / self.z_min(y)
 
     def z_valid(self, y):
         """True when flat-ground z(y) is not saturated by the horizon clamp."""

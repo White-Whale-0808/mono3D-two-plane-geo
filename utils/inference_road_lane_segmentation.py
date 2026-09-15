@@ -78,7 +78,7 @@ def main():
     # paint-evidence segment gate — same as pipeline.py
     if len(segments):
         segments = filter_paint_segments(
-            resized_image, segments, f_x, f_y, camera_height, w_real)
+            resized_image, segments, f_x, f_y, camera_height)
     t2 = time.perf_counter()
 
     """
@@ -98,9 +98,9 @@ def main():
     right_points = refine_inner_points(
         resized_image, inner_chain_points(inner_right, False), False)
     left_points = truncate_at_evidence_break(
-        resized_image, left_points, True, f_x, f_y, camera_height, w_real)
+        resized_image, left_points, True, f_x, f_y, camera_height)
     right_points = truncate_at_evidence_break(
-        resized_image, right_points, False, f_x, f_y, camera_height, w_real)
+        resized_image, right_points, False, f_x, f_y, camera_height)
     left_points, right_points = truncate_at_depth_jump(
         left_points, right_points, f_x, w_real, resized_image.height)
     left_curve = lane_curve(left_points)

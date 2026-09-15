@@ -51,6 +51,12 @@ Two layers use this score (validated on all three Town03 datasets):
    in a row while normal frames show at most 1 isolated failure, so the
    run-length rule separates them cleanly (mode A frames 147-243:
    MAE 2.4-9.8 → < 0.8, dy_far back inside ±3 px).
+
+Calibration needed: f_x, f_y and camera_height only. The one geometric
+quantity these checks use is the row depth z_min(y) = f_y*h/(y-cy+grade),
+so the lane width never enters — CameraGeometry is built via
+without_lane_width(). This is why the guard stays valid on a camera whose
+lane width is unknown or being estimated.
 """
 
 _STRIPE_M = 0.125       # painted stripe real width (m), single stripe (CARLA)
@@ -74,7 +80,7 @@ def _drop_window(geom, y):
     return k + 2, min(3 * k + 8, _FAR_CAP_PX)
 
 
-def filter_paint_segments(image_rgb, segments, f_x, f_y, camera_height, w_real):
+def filter_paint_segments(image_rgb, segments, f_x, f_y, camera_height):
     """Keep only ELSED segments that lie on a painted-marking edge.
 
     Direction-agnostic: probes both sides of each segment and keeps the
@@ -87,7 +93,7 @@ def filter_paint_segments(image_rgb, segments, f_x, f_y, camera_height, w_real):
         return segs
     gray = _gray(image_rgb)
     h, w = gray.shape
-    geom = CameraGeometry(f_x, f_y, camera_height, w_real, w, h)
+    geom = CameraGeometry.without_lane_width(f_x, f_y, camera_height, w, h)
 
     keep = np.zeros(len(segs), dtype=bool)
     for si, (x1, y1, x2, y2) in enumerate(segs):
@@ -113,7 +119,7 @@ def filter_paint_segments(image_rgb, segments, f_x, f_y, camera_height, w_real):
 
 
 def truncate_at_evidence_break(image_rgb, points, is_left,
-                               f_x, f_y, camera_height, w_real):
+                               f_x, f_y, camera_height):
     """Cut refined inner-chain points at the first sustained paint-evidence
     failure, near to far. Direction-aware: paint lies OUTWARD of the inner
     edge.
@@ -133,7 +139,7 @@ def truncate_at_evidence_break(image_rgb, points, is_left,
         return pts
     gray = _gray(image_rgb)
     h, w = gray.shape
-    geom = CameraGeometry(f_x, f_y, camera_height, w_real, w, h)
+    geom = CameraGeometry.without_lane_width(f_x, f_y, camera_height, w, h)
     out_sign = -1 if is_left else 1
 
     pts = pts[np.argsort(-pts[:, 1])]        # near (large y) first

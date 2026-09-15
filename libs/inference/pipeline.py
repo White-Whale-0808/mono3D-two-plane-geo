@@ -67,7 +67,7 @@ def infer_one(
     # on real paint — see paint_evidence.py
     if len(segments):
         segments = filter_paint_segments(
-            resized_image, segments, f_x, f_y, camera_height, w_real)
+            resized_image, segments, f_x, f_y, camera_height)
 
     # 3. lane segmentation (per-band innermost selection)
     inner_left, inner_right = split_left_right_lines(
@@ -84,9 +84,9 @@ def infer_one(
     right_points = refine_inner_points(
         resized_image, inner_chain_points(inner_right, False), False)
     left_points = truncate_at_evidence_break(
-        resized_image, left_points, True, f_x, f_y, camera_height, w_real)
+        resized_image, left_points, True, f_x, f_y, camera_height)
     right_points = truncate_at_evidence_break(
-        resized_image, right_points, False, f_x, f_y, camera_height, w_real)
+        resized_image, right_points, False, f_x, f_y, camera_height)
     # depth-continuity guard: real paint beyond a crest occlusion is
     # still a DIFFERENT lane section — never join it to the near chain
     left_points, right_points = truncate_at_depth_jump(
