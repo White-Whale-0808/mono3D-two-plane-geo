@@ -81,9 +81,15 @@ diffs the pitch-curve hashes over CARLA (120 frames) plus OpenLane Tier A
 (168 frames / 16 segments):
 
 - ROI corridor and seed-window outer bound: **deleted**, 288/288 frames
-  bit-identical with them disabled. The seed bound was worse than inert — the
-  seed rule is innermost-first, so an outer bound could only discard a far
-  candidate that would have been picked when nothing nearer existed.
+  bit-identical with them disabled, and not one of 764 seeds moved over a
+  further 552 frames picked for a *dashed* ego-lane marking. They were inert
+  for a non-obvious reason: both were written as `px_max_at(3.25, y)`, i.e.
+  against `z_min` with its ±15° grade slack, which from 6 m onward admits far
+  more than 3.25 m of real lateral distance (CARLA 8.6 m at z=10; OpenLane,
+  whose bottom row already sees 6.85 m, was never bounded at 3.25 m at all).
+  ⚠ The failure they were meant to prevent is real and predates the removal —
+  28 of 512 dashed frames seed on the adjacent lane, identically before and
+  after — and is tracked as WWH-21; re-adding these two would not cover it.
 - cross-lane cap: **now measured per frame** (`_measure_lane_width_m`). Each
   side's lateral offset is read at its own seed row and the two are summed,
   so neither side is extrapolated; one side alone gives 2×. Measured 3.317 m

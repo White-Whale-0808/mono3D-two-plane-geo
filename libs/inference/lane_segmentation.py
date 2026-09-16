@@ -29,16 +29,35 @@ Parameter derivation (see docs/papers/lane_segmentation_design_logic.drawio):
   metres. Stating the metres directly is what lets this stage run on a road of
   unknown width.
 
-  Two further thresholds used to live here and are gone, because disabling
-  them left the output BIT-IDENTICAL on 288 frames across two datasets and
-  two cameras (CARLA Town03 120, OpenLane Tier A 168 / 16 segments):
+  Two further thresholds used to live here and are gone — the ROI corridor
+  (segment mid_x within one lane width of the axis) and the seed x-window's
+  outer bound. Disabling them left the output BIT-IDENTICAL on 288 frames
+  across two datasets and two cameras (CARLA Town03 120, OpenLane Tier A
+  168 / 16 segments), and moved not one of 764 seeds over a further 552
+  frames picked for a DASHED ego-lane marking — the case they were supposed
+  to cover. The side test the seed window also carried is kept, inline.
 
-    - ROI corridor (segment mid_x within one lane width of the axis):
-      never rejected anything that mattered on either dataset.
-    - seed x-window outer bound: selection is innermost-first, so an outer
-      bound can only discard a far candidate that would have been picked
-      when nothing nearer existed — its only effect was losing a seed.
-      The side test it also carried is kept, inline.
+  WHY they were inert matters, because the obvious reason is wrong. It is NOT
+  that innermost-first selection makes an outer bound redundant: the band loop
+  returns at the FIRST band holding any candidate, so a bound that empties a
+  band does change which band the seed comes from. The real reason is that
+  both were written as px_max_at(3.25, y) — against z_min, which carries the
+  ±15° grade slack. In flat-road metres that admits 3.25·z_at/z_min, and the
+  slack starts at 6 m:
+
+      z_at        6 m     8 m    10 m    12 m
+      CARLA      3.25    5.40    8.63   12.93   m of real lateral distance
+      OpenLane     --    4.35    5.99    8.19   (bottom row already sees 6.85 m)
+
+  So on a camera mounted as high as OpenLane's the bound was never a 3.25 m
+  barrier anywhere in the image; the next lane's marking (~5 m out) walks
+  through it from about 9.5 m onward.
+
+  The failure it was meant to prevent is real and PREDATES the removal: of
+  those 552 dashed frames, 28 of 512 (5.5%) seed on the adjacent lane and
+  measure a 5-12 m "lane", identically with and without the bound; 23 of the
+  28 already produce no pitch at all. A fix needs a bound derived from the
+  flat-road depth rather than the grade-padded one, and is tracked separately.
 
   The slope gate, measured the same way, is the opposite case and stays:
   disabling it costs 2 whole frames and 14.65 m of median range on the
@@ -206,10 +225,10 @@ def _find_seed(infos, selected, is_left, center_x,
             continue
 
         # The seed must lie on this side of the camera axis, and that is the
-        # WHOLE constraint: there used to be an outer bound at one lane width
-        # too, but selection below is innermost-first, so an outer bound can
-        # only ever discard a far candidate that would have been picked when
-        # nothing nearer existed. Its only moment of effect was losing a seed.
+        # WHOLE constraint. An outer bound at one lane width used to sit here
+        # as well; removing it moved not one of 764 seeds over 552 dashed-lane
+        # OpenLane frames, for a non-obvious reason — see the module docstring,
+        # and do NOT re-add it expecting it to stop adjacent-lane seeding.
         group_tol = max(_TOL_PX_FLOOR, geom.px_max_at(_TOL_X_M, y_c))
 
         cands = []
