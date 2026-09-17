@@ -7,24 +7,6 @@ from scipy.interpolate import UnivariateSpline
 WINDOW_FRAC = 0.15
 WINDOW_MIN_M = 1.0
 
-# Near-field self-calibration: ground-plane depth window (m) and the θ0 gate.
-# The window's lower bound clears the image margin, the upper bound limits the
-# road-curvature error (relative error z²/(2·R·h) — sub-percent at 5 m for
-# R ≥ 1 km). The gate rejects frames whose w(z) trend says the near field is
-# not the support plane (grade transitions, and on a real car suspension
-# transients). It admits at most w·θ0·z̄/h ≈ 0.055 m (1.7%) of width bias
-# while sitting well above the θ0 noise floor on steady sections (full_road
-# scan 2026-08-28: steady-section w std 0.2%, θ0 tracking dpitch/ds at
-# corr 0.77).
-#
-# Known limitation on SUSTAINED grades (up/down_hile acceptance 2026-08-28):
-# the vehicle body sits at a small direction-dependent pitch relative to the
-# road (measured road_pitch − cam_pitch: −0.11° descending, +0.12° climbing),
-# which pushes θ0 to ~±0.25-0.32° for whole sections — so the gate rejects
-# 80-95% of frames there, and the ones it admits still carry a ±0.03-0.05 m
-# residual. The principled fix is to CORRECT with the measured θ0 (the
-# Theil-Sen intercept `w_real_z0` is already θ0-free) rather than only gate
-# on it; that is the next step, not done here.
 # ---------------------------------------------------------------- near field
 # The window is DERIVED from the camera, not hand-set (WWH-19, 2026-09-12).
 # The old fixed z ∈ [2, 5] m is a property of this project's 1.08 m camera: on
