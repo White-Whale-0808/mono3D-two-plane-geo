@@ -137,10 +137,11 @@ def test_calibrator_adopts_holds_and_expires():
     assert _fed(cal, 0.1, 0.0) == pytest.approx(3.5)
     assert _fed(cal, 0.7, 0.0) == pytest.approx(syn.W_REAL, rel=1e-6)
     # grade knee at the camera (road_points pitches away from the support
-    # plane at z=0): a large θ0 trend — reject, hold the adopted value
+    # plane at z=0): the near-field fit is no longer a straight w(z) trend, so
+    # the quality gate rejects it — hold the adopted value
     held = _fed(cal, 1.0, 8.0)
     assert held == pytest.approx(syn.W_REAL, rel=1e-6)
-    assert abs(cal.last_estimate["theta0_deg"]) > cal.theta0_gate_deg
+    assert cal.last_estimate["quality_ok"] is False
     # still rejected past MAX_HOLD metres: the patch is behind us, fall back
     assert _fed(cal, 0.7 + 5.5, 8.0) == pytest.approx(3.5)
 

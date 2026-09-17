@@ -25,23 +25,71 @@ WINDOW_MIN_M = 1.0
 # residual. The principled fix is to CORRECT with the measured θ0 (the
 # Theil-Sen intercept `w_real_z0` is already θ0-free) rather than only gate
 # on it; that is the next step, not done here.
-NEARFIELD_Z_MIN_M = 2.0
-NEARFIELD_Z_MAX_M = 5.0
-THETA0_GATE_DEG = 0.3
+# ---------------------------------------------------------------- near field
+# The window is DERIVED from the camera, not hand-set (WWH-19, 2026-09-12).
+# The old fixed z ∈ [2, 5] m is a property of this project's 1.08 m camera: on
+# OpenLane's 2.116 m / 828 px camera the image bottom row already looks 6.85 m
+# ahead, so that window contains ZERO rows and the whole self-calibration
+# silently never ran. What actually sets the geometry is f_y·h:
+#
+#     z(y) = f_y·h / (y − cy)      bottom row  ->  z_bottom = f_y·h / (H/2)
+#
+# Lower bound: start a little past the bottom row (hood, lens edge, the rows
+# where the curves are least reliable).
+# Upper bound, two constraints, take the nearer:
+#   curvature — the anchor assumes the road ahead IS the wheel plane; a vertical
+#               curve of radius R deviates z²/(2R), i.e. a relative depth error
+#               z²/(2·R·h), so z_hi <= sqrt(2·R·h·tol). Note the h in the
+#               denominator: a HIGHER camera tolerates a deeper window.
+#   sampling  — the window holds f_y·h·(1/z_lo − 1/z_hi) image rows; the
+#               Theil-Sen intercept needs a decent number of them.
+# When the two do not intersect (OpenLane: curvature says 5.63 m but the window
+# cannot start before 8.22 m) sampling wins and `curvature_ok` comes back False
+# — that camera's near-field anchor carries ~1.6% of curvature bias no matter
+# how the parameters are chosen. That is a property of the mount, not a bug.
+NEARFIELD_Z_LO_FACTOR = 1.2
+NEARFIELD_MIN_ROWS = 40
+NEARFIELD_CURV_R_M = 1500.0    # worst-case vertical curve (OpenLane 60 m rise p90)
+NEARFIELD_CURV_TOL = 0.005     # tolerable anchor depth error from that curvature
+NEARFIELD_Z_HI_FACTOR_CAP = 3.0
+# Quality gate (replaces the old |θ0| <= 0.3° gate, which rejected 93% of frames
+# on a high camera and is redundant now that the headline estimate is the
+# θ0-free intercept). What is left to reject is a fit that is merely noisy:
+#   - too few rows / too short a z span for an intercept extrapolation
+#   - residual scatter beyond what ~2 px of edge noise explains
+#     (a width sample is z·w_px/f_x, so 1 px of edge noise is z/f_x metres)
+#   - |θ0| past any plausible mounting/support-plane angle
+# ⚠ It cannot reject a CONFIDENTLY wrong fit. Measured on OpenLane's San
+# Francisco tram-track segment, where the tracker locks onto the rails: the
+# residual MAD there is 0.001 m — SMALLER than a healthy frame's 0.002 — while
+# the width is 1.58 m against a true 3.17 m. Rails are straight, parallel and
+# bright, so the near-field fit is clean; it is simply fitted to the wrong
+# pair of lines. That failure has to be caught upstream, in line selection.
+NEARFIELD_MIN_POINTS = 8
+NEARFIELD_MIN_SPAN_FRAC = 0.5
+NEARFIELD_RESID_PX = 2.0
+NEARFIELD_THETA0_MAX_DEG = 3.0
 # Hold/adopt policy (full_road acceptance 2026-08-28, verified against the
 # GT-projected implied width): a near-field measurement describes the road
 # patch it was taken on, so a held value expires once the vehicle has driven
-# past that patch — NEARFIELD_Z_MAX_M metres. And adoption requires the gate
+# past that patch — the window's own far edge, `nearfield_window`'s z_hi, which
+# is now per-camera rather than a constant. And adoption requires the gate
 # to stay open across a minimum stretch of travel: at a curvature INFLECTION
 # the w(z) trend crosses zero while the bias is at its largest (θ0 is blind
 # there for an isolated frame — s161 adopted a 2.9 reading that way), whereas
 # genuine support-plane stretches pass for many metres in a row.
-NEARFIELD_MAX_HOLD_M = NEARFIELD_Z_MAX_M
 NEARFIELD_MIN_RUN_M = 0.5
-# Frame-count fallbacks when the caller never feeds travel distance
-# (assume ~0.1 m/frame — conservative for typical capture rates).
-NEARFIELD_MAX_HOLD_FRAMES = 40
-NEARFIELD_MIN_RUN_FRAMES = 4
+NEARFIELD_MIN_RUN_FRAMES = 2       # a run is at least two frames, whatever the spacing
+# The hold bound is the window's own far edge (the patch that was measured is
+# behind us once we have driven past it), so it is now per-camera, not a
+# constant — see `nearfield_window`.
+#
+# ⚠ The frame-count fallbacks are gone (WWH-19). They assumed ~0.1 m/frame,
+# which is this project's CARLA capture; OpenLane runs at 0.96 m/frame, where
+# the old 40-frame hold meant 38 m instead of 5 m and the 0.5 m minimum run was
+# satisfied by a SINGLE frame — the protection was silently off on both ends.
+# Without `advance_to`, distance is unknown, so each frame now stands alone:
+# a passing frame is adopted for itself and nothing is held across frames.
 
 
 def back_project_widths(widths, f_x, f_y, image_height, w_real):
@@ -65,9 +113,31 @@ def back_project_widths(widths, f_x, f_y, image_height, w_real):
     return z, Y_3d
 
 
+def nearfield_window(f_y, camera_height, image_height):
+    """Near-field anchor window (z_lo, z_hi, curvature_ok) for this camera.
+
+    See the NEARFIELD_* constants for the derivation. `curvature_ok` is False
+    when the sampling requirement forces the window past the depth at which the
+    support-plane assumption holds to NEARFIELD_CURV_TOL — the estimate is
+    still the best available on that camera, but it carries a known bias.
+
+        CARLA    f_y·h =  491  ->  z ∈ [2.30, 4.02] m, curvature_ok=True
+        OpenLane f_y·h = 1753  ->  z ∈ [8.22, 10.11] m, curvature_ok=False
+    """
+    z_bottom = f_y * camera_height / (image_height / 2.0)
+    z_lo = NEARFIELD_Z_LO_FACTOR * z_bottom
+    z_curv = float(np.sqrt(2.0 * NEARFIELD_CURV_R_M * camera_height
+                           * NEARFIELD_CURV_TOL))
+    denom = 1.0 / z_lo - NEARFIELD_MIN_ROWS / (f_y * camera_height)
+    z_rows = 1.0 / denom if denom > 0 else np.inf
+    if z_curv >= z_rows:
+        return z_lo, min(z_curv, NEARFIELD_Z_HI_FACTOR_CAP * z_lo), True
+    return z_lo, z_rows, False
+
+
 def estimate_w_real_nearfield(widths, f_x, f_y, image_height, camera_height,
-                              z_near_min=NEARFIELD_Z_MIN_M,
-                              z_near_max=NEARFIELD_Z_MAX_M, min_points=8):
+                              z_near_min=None, z_near_max=None,
+                              min_points=NEARFIELD_MIN_POINTS):
     """Per-frame w_real from the near-field ground plane (camera-height anchor).
 
     The near road is the plane the wheels sit on, and the camera is rigid on
@@ -82,10 +152,9 @@ def estimate_w_real_nearfield(widths, f_x, f_y, image_height, camera_height,
 
         w_real(y) = w_px · f_y·h / (f_x·(y - cy))
 
-    Rows are kept where z_h ∈ [z_near_min, z_near_max]: the lower bound skips
-    the hood/margin rows, the upper bound limits the road-curvature error
-    (deviation from the support plane grows as z²/2R, i.e. relative error
-    z²/(2·R·h) — sub-percent at 5 m for R ≥ 1 km).
+    Rows are kept where z_h ∈ [z_near_min, z_near_max]; the window defaults to
+    `nearfield_window(f_y, camera_height, image_height)`, derived from the
+    camera rather than hand-set.
 
     A Theil-Sen fit of w_real(y) against z_h separates the two calibration
     unknowns, because their error signatures differ: a wrong w_real shifts all
@@ -98,18 +167,40 @@ def estimate_w_real_nearfield(widths, f_x, f_y, image_height, camera_height,
     Returns None when fewer than min_points rows land in the window (short
     curves, bottom occlusion); otherwise a dict:
 
-        w_real_med : robust headline estimate (median over the window; carries
-                     a +w·θ0·z̄/h bias if the mounting pitch is uncalibrated)
-        w_real_z0  : Theil-Sen intercept — θ0-free, but an extrapolation to
-                     z=0, so noisier than the median
+        w_real_z0  : HEADLINE estimate — Theil-Sen intercept, θ0-free
+        w_real_med : median over the window; kept for diagnostics only. It
+                     carries a +w·θ0·z̄/h bias, and on a sustained grade the
+                     body sits at a fixed pitch relative to the road, so that
+                     bias is a whole-section offset rather than noise.
         theta0_deg : implied camera mounting pitch (deg, positive = down)
         n_points   : rows used
         z_lo, z_hi : ground-plane depth range actually used (m)
+        resid_mad  : robust scatter about the Theil-Sen line (m)
+        quality_ok : passes the NEARFIELD_* quality gate (see the constants)
+
+    Measured per-segment error of each estimate against a GT-depth arbiter
+    (WWH-19, 2026-09-12; CARLA per road_id / OpenLane Tier A per segment):
+
+                       CARLA      OpenLane
+        fixed w_real    108 mm      173 mm
+        w_real_med       51 mm      189 mm
+        w_real_z0        46 mm       35 mm      <- adopted
+        quadratic        31 mm       94 mm (diverges: long extrapolation lever)
+
+    The quadratic intercept absorbs road curvature as well as θ0 and wins on
+    CARLA, but its extrapolation to z=0 is unstable when the window starts far
+    out (z_lo/span 1.37 on CARLA vs 4.46 on OpenLane). One estimator for both
+    cameras was the explicit call, so the linear intercept it is.
 
     Input `widths` is the usual (y_pixel, pixel_width) array. The pipeline
-    consumes this through NearfieldWidthCalibrator (θ0 gate + hold); the
-    validation evidence lives in debug/w_real_nearfield_scan.py / _analysis.py.
+    consumes this through NearfieldWidthCalibrator (quality gate + hold); the
+    validation evidence lives in debug/w_real_variants.py.
     """
+    if z_near_min is None or z_near_max is None:
+        z_auto_lo, z_auto_hi, _ = nearfield_window(f_y, camera_height,
+                                                   image_height)
+        z_near_min = z_auto_lo if z_near_min is None else z_near_min
+        z_near_max = z_auto_hi if z_near_max is None else z_near_max
     widths = np.asarray(widths, dtype=float)
     if widths.ndim != 2 or widths.shape[1] != 2 or len(widths) == 0:
         return None
@@ -131,10 +222,21 @@ def estimate_w_real_nearfield(widths, f_x, f_y, image_height, camera_height,
     w_z0 = float(fit.intercept)
     theta0 = float(np.degrees(np.arctan(fit.slope * camera_height / w_z0))) \
         if w_z0 > 0 else np.nan
+    resid = w_est - (fit.intercept + fit.slope * z)
+    resid_mad = float(1.4826 * np.median(np.abs(resid - np.median(resid))))
+    # 1 px of edge noise on a width sample is z/f_x metres at that depth.
+    resid_allowed = NEARFIELD_RESID_PX * float(np.median(z)) / f_x
+    quality_ok = bool(
+        w_z0 > 0
+        and np.isfinite(theta0) and abs(theta0) <= NEARFIELD_THETA0_MAX_DEG
+        and np.ptp(z) >= NEARFIELD_MIN_SPAN_FRAC * (z_near_max - z_near_min)
+        and resid_mad <= resid_allowed)
     return {
         "w_real_med": w_med,
         "w_real_z0": w_z0,
         "theta0_deg": theta0,
+        "resid_mad": resid_mad,
+        "quality_ok": quality_ok,
         "n_points": int(sel.sum()),
         "z_lo": float(z.min()),
         "z_hi": float(z.max()),
@@ -142,16 +244,20 @@ def estimate_w_real_nearfield(widths, f_x, f_y, image_height, camera_height,
 
 
 def nearfield_widths_from_curves(left_curve, right_curve, f_y, camera_height,
-                                 image_height, z_lo=NEARFIELD_Z_MIN_M,
-                                 z_hi=NEARFIELD_Z_MAX_M):
+                                 image_height, z_lo=None, z_hi=None):
     """Per-row (y, w_px) over the near-field window, straight off the curves.
 
     Every integer image row whose ground-plane depth f_y·h/(y−cy) falls in
     [z_lo, z_hi] and that both curves cover — denser than the z-uniform pitch
-    samples, which is what the Theil-Sen θ0/width split wants.
+    samples, which is what the Theil-Sen θ0/width split wants. The window
+    defaults to `nearfield_window` for this camera.
     """
     if left_curve is None or right_curve is None:
         return np.empty((0, 2))
+    if z_lo is None or z_hi is None:
+        auto_lo, auto_hi, _ = nearfield_window(f_y, camera_height, image_height)
+        z_lo = auto_lo if z_lo is None else z_lo
+        z_hi = auto_hi if z_hi is None else z_hi
     cy = image_height / 2.0
     y_lo = max(left_curve["y"][0], right_curve["y"][0],
                cy + f_y * camera_height / z_hi)
@@ -168,33 +274,35 @@ def nearfield_widths_from_curves(left_curve, right_curve, f_y, camera_height,
 
 
 class NearfieldWidthCalibrator:
-    """Per-frame w_real from the near field: θ0-gated, bounded hold-last-valid.
+    """Per-frame w_real from the near field: quality-gated, bounded hold.
 
     Wraps `estimate_w_real_nearfield` into the stateful policy the pipeline
-    uses. A frame passes the gate when |θ0| <= THETA0_GATE_DEG (the near
-    field IS the support plane); its width is adopted only once the gate has
-    stayed open across NEARFIELD_MIN_RUN_M of travel (isolated passes at
-    curvature inflections are the gate's blind spot). A rejected frame reuses
-    the last adopted value while the vehicle is still within
-    NEARFIELD_MAX_HOLD_M of the last accepted patch; beyond that the value
-    is stale — width demonstrably changes across long rejected stretches
-    (full_road road 41: 3.39 → 3.31) — and the configured w_real takes over
-    as fallback.
+    uses. A frame passes when the fit is of usable quality (`quality_ok`, see
+    the NEARFIELD_* constants); its width — the θ0-free intercept — is adopted
+    once the gate has stayed open across NEARFIELD_MIN_RUN_M of travel AND at
+    least NEARFIELD_MIN_RUN_FRAMES frames. A rejected frame reuses the last
+    adopted value while the vehicle is still within the window's far edge of
+    the last accepted patch; beyond that the value is stale — width
+    demonstrably changes across long rejected stretches (full_road road 41:
+    3.39 → 3.31) — and the configured w_real takes over as fallback.
 
     One instance per image sequence. Call `advance_to(dist_m)` with the
-    cumulative travel distance before each frame to make the run/hold bounds
-    metric; without it they fall back to frame counts. Stages 1–4 keep the
+    cumulative travel distance before each frame; without it distance is
+    unknown, so no value is held across frames (see the NEARFIELD_MIN_RUN_*
+    note — the old frame-count fallbacks baked in this project's 0.1 m/frame
+    capture rate and silently misfired at 1 m/frame). Stages 1–4 keep the
     configured w_real for their threshold derivations (insensitive at the
     few-percent level); only the metric stage consumes the calibrated value.
     """
 
-    def __init__(self, f_x, f_y, image_height, camera_height, w_real_fallback,
-                 theta0_gate_deg=THETA0_GATE_DEG):
+    def __init__(self, f_x, f_y, image_height, camera_height, w_real_fallback):
         self.f_x = f_x
         self.f_y = f_y
         self.image_height = image_height
         self.camera_height = camera_height
-        self.theta0_gate_deg = theta0_gate_deg
+        self.z_lo, self.z_hi, self.curvature_ok = nearfield_window(
+            f_y, camera_height, image_height)
+        self.max_hold_m = self.z_hi
         self.w_real_fallback = float(w_real_fallback)
         self.w_real = float(w_real_fallback)   # value the last update() used
         self.last_estimate = None              # raw estimator dict, last frame
@@ -208,37 +316,41 @@ class NearfieldWidthCalibrator:
         """Cumulative travel distance (m) of the frame about to be fed."""
         self._dist = float(dist_m)
 
-    def _span(self, since):
-        """Travel since a (dist, frame) mark: metres if known, else frames."""
-        if self._dist is not None and since[0] is not None:
-            return self._dist - since[0], True
-        return self._frame - since[1], False
+    def _span_m(self, since):
+        """Travel in metres since a (dist, frame) mark; None when unknown."""
+        if self._dist is None or since[0] is None:
+            return None
+        return self._dist - since[0]
 
     def update(self, left_curve, right_curve):
         """Feed one frame's lane curves; returns the w_real to use for it."""
         self._frame += 1
         widths = nearfield_widths_from_curves(
             left_curve, right_curve, self.f_y, self.camera_height,
-            self.image_height)
+            self.image_height, z_lo=self.z_lo, z_hi=self.z_hi)
         est = estimate_w_real_nearfield(
-            widths, self.f_x, self.f_y, self.image_height, self.camera_height)
+            widths, self.f_x, self.f_y, self.image_height, self.camera_height,
+            z_near_min=self.z_lo, z_near_max=self.z_hi)
         self.last_estimate = est
-        passed = est is not None and np.isfinite(est["theta0_deg"]) \
-            and abs(est["theta0_deg"]) <= self.theta0_gate_deg
-        if passed:
+        if est is not None and est["quality_ok"]:
             if self._run_start is None:
                 self._run_start = (self._dist, self._frame)
-            span, metric = self._span(self._run_start)
-            if span >= (NEARFIELD_MIN_RUN_M if metric
-                        else NEARFIELD_MIN_RUN_FRAMES):
-                self._held = est["w_real_med"]
+            span_m = self._span_m(self._run_start)
+            frames = self._frame - self._run_start[1] + 1
+            run_ok = (frames >= NEARFIELD_MIN_RUN_FRAMES
+                      and (span_m is None or span_m >= NEARFIELD_MIN_RUN_M))
+            if run_ok:
+                self._held = est["w_real_z0"]
                 self._last_adopt = (self._dist, self._frame)
         else:
             self._run_start = None
         if self._held is not None:
-            span, metric = self._span(self._last_adopt)
-            if span <= (NEARFIELD_MAX_HOLD_M if metric
-                        else NEARFIELD_MAX_HOLD_FRAMES):
+            span_m = self._span_m(self._last_adopt)
+            # No odometry -> the patch cannot be tracked, so only the frame that
+            # produced the value may use it; nothing is carried forward.
+            fresh = (span_m <= self.max_hold_m if span_m is not None
+                     else self._frame == self._last_adopt[1])
+            if fresh:
                 self.w_real = self._held
                 return self.w_real
         self.w_real = self.w_real_fallback

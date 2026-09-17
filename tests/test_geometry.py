@@ -83,3 +83,32 @@ def test_lane_px_max_bounds_lane_px(geom):
     """The worst-case (uphill) lane width is never narrower than nominal."""
     for y in np.linspace(geom.cy + geom.min_dy, syn.IMG_H - 1, 60):
         assert geom.lane_px_max(y) >= geom.lane_px(y) - 1e-9
+
+
+def test_depth_needs_no_lane_width():
+    """without_lane_width() reproduces every depth member exactly.
+
+    The lane width is a metric gauge for the WIDTH equation only; the depth
+    of a row is f_y*h/(y-cy) and cannot depend on it. Callers that only
+    probe rows (paint_evidence) are therefore valid on a camera whose lane
+    width is unknown or still being estimated.
+    """
+    full = CameraGeometry(syn.F_X, syn.F_Y, syn.CAM_H, syn.W_REAL,
+                          syn.IMG_W, syn.IMG_H)
+    bare = CameraGeometry.without_lane_width(syn.F_X, syn.F_Y, syn.CAM_H,
+                                             syn.IMG_W, syn.IMG_H)
+    for y in np.linspace(bare.cy + bare.min_dy, syn.IMG_H - 1, 60):
+        assert bare.z_at(y) == full.z_at(y)
+        assert bare.z_min(y) == full.z_min(y)
+        assert bare.z_valid(y) == full.z_valid(y)
+
+
+def test_the_width_members_refuse_to_guess_a_lane_width():
+    """Not a silent 0 or a default: the two callers differ in what they need."""
+    bare = CameraGeometry.without_lane_width(syn.F_X, syn.F_Y, syn.CAM_H,
+                                             syn.IMG_W, syn.IMG_H)
+    y = syn.row_for_depth(8.0)
+    with pytest.raises(ValueError, match="lane width"):
+        bare.lane_px(y)
+    with pytest.raises(ValueError, match="lane width"):
+        bare.lane_px_max(y)

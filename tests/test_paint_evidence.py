@@ -15,7 +15,8 @@ from libs.inference.paint_evidence import (_FAR_CAP_PX, _PEAK_PX,
 from libs.inference.geometry import CameraGeometry
 from tests import synthetic as syn
 
-CAM = (syn.F_X, syn.F_Y, syn.CAM_H, syn.W_REAL)
+CAM = (syn.F_X, syn.F_Y, syn.CAM_H)
+# No lane width: these checks only need the row depth f_y*h/(y-cy).
 # Rows well inside the image, ordered near (large y) to far (small y).
 ROWS = np.arange(460, 300, -4, dtype=float)
 X_INNER = 300.0
@@ -108,7 +109,7 @@ def test_only_the_far_drop_probe_scales_with_geometry():
     """
     assert isinstance(_PEAK_PX, int)
 
-    geom = CameraGeometry(*CAM, syn.IMG_W, syn.IMG_H)
+    geom = CameraGeometry.without_lane_width(*CAM, syn.IMG_W, syn.IMG_H)
     near_lo, near_hi = _drop_window(geom, 480.0)     # z ≈ 2 m
     far_lo, far_hi = _drop_window(geom, 270.0)       # beyond the clamp depth
 

@@ -31,9 +31,10 @@ pipeline 與 GT 模組**完全不用改**，靠三個轉換達成：
 3. **逐 segment 一個資料集目錄**：近場自標定的 calibrator 與路線剖面圖都假設
    「一條連續路線」，把 99 段混成一個目錄會讓 ``collect_dist_m`` 失去意義。
 
-篩選條件見 :data:`GRADE_MIN` 等常數與 ``--mode``；預設連虛線也收，
-``measurements.csv`` 會留下 ``left_category`` / ``right_category``，
-下游要再篩實線隨時可以，不必重轉。
+篩選條件見模組頂部的常數與 ``--mode``；預設連虛線也收，``measurements.csv``
+會留下 ``left_category`` / ``right_category``，下游要再篩實線隨時可以，不必重轉。
+**坡度同理**：``grade_60m`` 是欄位不是篩選（``--grade-min`` 預設 0），平路的幀
+留著當陰性對照。
 
 用法::
 
@@ -83,7 +84,14 @@ PAINT = SOLID | DASHED          # curbside(20/21) 不是漆，paint_evidence 會
 # ⚠ 這個選擇幾乎不影響量到的寬度（跨 probe 的 |Δ| 中位 12–36 mm，與 GT 自身
 #   12 mm 的雜訊同級），影響的是哪些幀進得來、以及挑到哪條線。
 PROBE_X = 12.0
-GRADE_MIN = 0.30      # 60 m 內至少要有這麼多高程變化（m），否則沒有坡可估
+# 60 m 內的高程變化下限（m）。**預設 0＝全收，坡度是分層標籤不是篩選**
+# （2026-09-12 改）：平路的幀是陰性對照 —— 在沒有起伏的地方報出起伏就是假陽性，
+# 篩掉它們等於把「會不會無中生有」這個問題從資料裡刪掉。而且這個門檻與寬度那道
+# 的性質相反：寬度 2.5–4.5 的門檻兩側幾乎是空的（貼上界只有 5 幀，怎麼挪都一樣），
+# 0.30 卻正穿過分布主體（0.2–0.3 有 1,536 幀、0.3–0.6 有 2,713 幀），結論會對它敏感，
+# 而這個值沒有推導來源。`grade_60m` 欄位留在 measurements.csv 讓下游自己分層：
+# 平路 <0.1 m（14%）、邊緣 0.1–0.3（35%）、有坡 ≥0.3（51%）。
+GRADE_MIN = 0.0
 GRADE_SPAN = 60.0
 WIDTH_MIN, WIDTH_MAX = 2.5, 4.5   # 內側線間距的合理範圍（漆線中心對中心）
 
@@ -126,7 +134,7 @@ def inner_pair(lane_lines, probe_x=PROBE_X):
     return left, right
 
 
-def frame_record(data, accept):
+def frame_record(data, accept, grade_min=GRADE_MIN):
     """把一幀標註變成 (量測列, 剖面陣列)；不合格回 None。
 
     剖面 = 兩條內側線高度的平均，也就是**車道中心的路面**，深度均勻取樣。
@@ -154,7 +162,7 @@ def frame_record(data, accept):
 
     near = depth <= z0 + GRADE_SPAN
     grade = float(height[near].max() - height[near].min())
-    if grade < GRADE_MIN:
+    if grade < grade_min:
         return None
 
     meta = dict(
@@ -182,7 +190,7 @@ def warp_image(src_path, dst_path, K_src):
 
 
 def convert_segment(seg_dir, out_dir, image_root, accept, want_images,
-                    keep=None):
+                    keep=None, grade_min=GRADE_MIN):
     """轉一個 segment；回傳寫出的幀數。
 
     ``keep`` 若給定，只轉 (segment, frame_stem) 在集合裡的幀（分層實驗用）。
@@ -208,7 +216,7 @@ def convert_segment(seg_dir, out_dir, image_root, accept, want_images,
 
         if keep is not None and (seg_dir.name, path.stem) not in keep:
             continue
-        got = frame_record(data, accept)
+        got = frame_record(data, accept, grade_min)
         if got is None:
             continue
         meta, depth, height = got
@@ -264,6 +272,9 @@ def main(argv=None):
                     help="paint（預設）連虛線也收；solid 只收兩側實線")
     ap.add_argument('--no-images', action='store_true',
                     help='只轉標註，不處理影像（影像還沒下載時用）')
+    ap.add_argument('--grade-min', type=float, default=GRADE_MIN,
+                    help='60 m 起伏下限（m）。預設 0＝全收 —— 坡度是分層標籤'
+                         '不是篩選（見 GRADE_MIN 的註解）。要重現舊行為傳 0.3')
     ap.add_argument('--limit-segments', type=int, default=None)
     ap.add_argument('--frame-list', type=Path, default=None,
                     help='CSV（需有 segment / frame 欄），只轉列出的幀；'
@@ -288,7 +299,7 @@ def main(argv=None):
     kept_segments = 0
     for seg in segments:
         n = convert_segment(seg, args.out / seg.name, args.openlane,
-                            accept, not args.no_images, keep)
+                            accept, not args.no_images, keep, args.grade_min)
         if n:
             kept_segments += 1
             total += n

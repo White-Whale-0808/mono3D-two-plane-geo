@@ -56,7 +56,7 @@ The default estimator is `windowed`: for each sampled depth it takes a Theil-Sen
 
 ## Calibration and the Evidence Guards
 
-`f_x`, `f_y`, `w_real` and `camera_height` are **required**. Under the flat-ground pinhole model every lateral threshold has an exact pixel form at row `y`, so association tolerance, seed window, slope gates and model memory are all *derived* rather than hand-tuned. Three evidence guards ride on the same projection:
+`f_x`, `f_y` and `camera_height` are **required**. Under the flat-ground pinhole model every lateral threshold has an exact pixel form at row `y`, so association tolerance, slope gates and model memory are all *derived* rather than hand-tuned. Three evidence guards ride on the same projection:
 
 | Guard | Where | What it rejects |
 |---|---|---|
@@ -65,6 +65,24 @@ The default estimator is `windowed`: for each sampled depth it takes a Theil-Sen
 | Depth-continuity truncation | `lane_fitting.truncate_at_depth_jump` | A jump in paired-row depth that exceeds both a continuity gate and 1.5× the local-plane extrapolation. Real paint beyond a crest is a *disconnected* section and must never be joined to the near chain |
 
 Their thresholds are module constants with the derivations in the docstrings, not config values.
+
+**The tracker does not need the lane width** (since 2026-09-15). Every threshold in `lane_segmentation.py` is a lateral *distance*; `w_real` only ever converted "a fraction of a lane" into metres, so stages 1–3 now run on a road whose width they do not know. `paint_evidence` never needed it either — its one geometric quantity is the row depth `f_y·h/(y-cy)`, and the width it was handed was never read.
+
+Three of the five lateral constants are gone, each on measured evidence. The ablation pushes one gate's distance to 1e6 m (its pixel window then exceeds the image, so it can reject nothing) and diffs the pitch-curve hashes over CARLA (120 frames) and OpenLane Tier A (168 frames / 16 segments):
+
+| Constant | Outcome | Evidence |
+|---|---|---|
+| ROI corridor | deleted | 288/288 frames bit-identical without it |
+| seed-window outer bound | deleted | 288/288 bit-identical, and not one of 764 seeds moved over 552 frames picked for a *dashed* ego-lane marking — the case it was meant to cover |
+| cross-lane cap | now **measured** per frame | `_measure_lane_width_m` reads each side's lateral offset at its own seed row and sums them, so neither side is extrapolated; one side alone gives 2×. Reads 3.317 m on CARLA against a 3.3226 m GT-implied truth, and tracks OpenLane's real per-segment spread (2.77–3.84). Unmeasurable ⇒ cap off, never a guessed width |
+| slope gate | kept | The one lateral scale that *cannot* be measured instead of assumed — it runs in `_segment_info`, before any line has been found |
+| association tolerance | open | Its justification is unsettled: ELSED endpoint noise is a *pixel*-domain quantity (already covered by `_TOL_PX_FLOOR`), confusion with the next lane is a *metre*-domain one, and the two imply opposite scaling with depth |
+
+> ⚠ Why those two were inert is not the obvious reason. It is **not** that innermost-first selection makes an outer bound redundant — the band loop returns at the *first* band holding any candidate, so a bound that empties a band does change which band the seed comes from. Both were written as `px_max_at(3.25, y)`, i.e. against `z_min` with its ±15° grade slack, which in flat-road metres admits `3.25·z_at/z_min`. The slack starts at 6 m: on CARLA that is 5.4 m of real lateral distance at 8 m depth and 8.6 m at 10 m; on OpenLane, whose bottom image row already sees 6.85 m, the bound was never a 3.25 m barrier anywhere in the image.
+
+> ⚠ The failure they were meant to prevent is real and **predates their removal**: of the 552 dashed frames, 28 of 512 (5.5%) seed on the *adjacent* lane and measure a 5–12 m "lane", identically with and without the bound; 23 of those 28 already produce no pitch at all. A fix needs a bound derived from the flat-road depth rather than the grade-padded one, tracked as WWH-21 — re-adding these two thresholds would not cover it.
+
+> ⚠ The slope gate is the cautionary one. On CARLA it looks removable — 6 frames touched, range slightly *better* without it. On OpenLane, disabling it costs 2 whole frames and 14.65 m of median range. Those three Town03 routes have almost no junctions, and **a gate that rejects stop lines and crosswalks cannot be evaluated on roads that have none.**
 
 > A hand-tuned fallback for un-calibrated cameras (`min_slope` / `lane_band_tolerance` / `roi_near`) used to sit alongside this and was removed on 2026-08-27: every caller supplied the full calibration, so it was a second implementation that nothing ran and no test covered. Its thresholds were fitted to one dataset anyway, so a genuinely different camera would need them re-derived rather than reused — which is what the geometry path does on its own.
 
@@ -372,7 +390,7 @@ csv_io:
   problem_mae_threshold: 2.0
 ```
 
-> ⚠ **`w_real = 3.25` is specific to this road's marking layout** — double yellow on the left, single white on the right, on a 3.5 m lane. Because `w_real` is inner-edge to inner-edge, each side is inset from the boundary-centre width by a different amount (left 0.1875, right 0.0625, total 0.25). On the same 3.5 m lane: single+single → 3.375, double+single → **3.25**, double+double → 3.125. Re-derive it per road; do not carry 3.25 to another map or another lane. And determine it from height/geometry, never by minimising MAE — MAE trades the z scale against pitch error and its optimum is systematically pulled low.
+> ⚠ **`w_real = 3.25` is specific to this road's marking layout** — double yellow on the left, single white on the right, on a 3.5 m lane. Because `w_real` is inner-edge to inner-edge, each side is inset from the boundary-centre width by a different amount (left 0.1875, right 0.0625, total 0.25). On the same 3.5 m lane: single+single → 3.375, double+single → **3.25**, double+double → 3.125. Re-derive it per road; do not carry 3.25 to another map or another lane. And determine it from height/geometry, never by minimising MAE — MAE trades the z scale against pitch error and its optimum is systematically pulled low. Measured on 2026-09-15 over all three routes: the GT-implied truth is **3.3226 m** (`w_px·z_gt/f_x`, 2,011 frames) while profile MAE is minimised at **3.25**, and using the true width costs +0.020 MAE (+8.5%) on every route. The gap is not noise — a wrong `w_real` is cancelling a second systematic error somewhere else, the same pattern as the 2026-07-27 finding where it cancelled a missing camera forward offset.
 
 ---
 
