@@ -27,7 +27,15 @@ python -m utils.inference_road_lane_segmentation
 # outputs/route_profile_<dataset>.png — the whole-route terrain profile)
 python -m utils.batch_inference_road_lane_segmentation
 
-# CARLA real-time test (requires running CARLA server)
+# Batch overrides, so a toggle can be swept without editing the config
+python -m utils.batch_inference_road_lane_segmentation \
+    --dataset <DIR> --nearfield|--no-nearfield --tag <SUFFIX>
+
+# Unit tests — pure geometry, ~2 s, no images/weights/GPU.
+# ⚠ --no-sync is required: a plain `uv run` swaps the CUDA torch for the CPU wheel
+uv run --no-sync python -m pytest
+
+# CARLA real-time test (requires running CARLA server) — CURRENTLY BROKEN, see README
 python carla_module/realtime_test.py [--host HOST] [--port PORT] [--map MAP]
 
 # Same as the single-image command above — main.py is a thin wrapper around it
@@ -35,6 +43,8 @@ python main.py
 ```
 
 All inference config lives in `config/inference_road_lane_segmentation.yaml`.
+`openlane_module/` converts the OpenLane dataset into this project's format and
+holds the tools that measure what that data can verify — see its own README.
 
 ## Pipeline Architecture
 
@@ -76,31 +86,23 @@ un-calibrated cameras (`min_slope` / `lane_band_tolerance` / `roi_near` /
 lateral distance, and the lane width only ever converted "a fraction of a lane"
 into metres, so stages 1–3 now run on a road whose width they do not know.
 Three of the five lateral constants are gone, each on measured evidence rather
-than judgement — the ablation harness pushes a gate's distance to 1e6 m and
-diffs the pitch-curve hashes over CARLA (120 frames) plus OpenLane Tier A
-(168 frames / 16 segments):
+than judgement (ablation: push a gate's distance to 1e6 m, diff the pitch-curve
+hashes over CARLA 120 frames + OpenLane Tier A 168 frames). Two survive,
+`_TOL_X_M` and `_SLOPE_GATE_X_M`, and both are still hand-picked.
 
-- ROI corridor and seed-window outer bound: **deleted**, 288/288 frames
-  bit-identical with them disabled, and not one of 764 seeds moved over a
-  further 552 frames picked for a *dashed* ego-lane marking. They were inert
-  for a non-obvious reason: both were written as `px_max_at(3.25, y)`, i.e.
-  against `z_min` with its ±15° grade slack, which from 6 m onward admits far
-  more than 3.25 m of real lateral distance (CARLA 8.6 m at z=10; OpenLane,
-  whose bottom row already sees 6.85 m, was never bounded at 3.25 m at all).
-  ⚠ The failure they were meant to prevent is real and predates the removal —
-  28 of 512 dashed frames seed on the adjacent lane, identically before and
-  after — and is tracked as WWH-21; re-adding these two would not cover it.
-- cross-lane cap: **now measured per frame** (`_measure_lane_width_m`). Each
-  side's lateral offset is read at its own seed row and the two are summed,
-  so neither side is extrapolated; one side alone gives 2×. Measured 3.317 m
-  on CARLA against a 3.3226 m GT-implied truth, and tracks OpenLane's real
-  per-segment spread (2.77–3.84). Unmeasurable ⇒ cap off, never a guessed width.
-- slope gate: **kept**. It looked removable on CARLA (6 frames touched, range
-  slightly better without it) because those routes have almost no junctions;
-  on OpenLane it is worth 2 whole frames and 14.65 m of median range. A gate
-  that rejects stop lines and crosswalks cannot be evaluated on roads with
-  none. It is also the one lateral scale that cannot be measured instead of
-  assumed: it runs in `_segment_info`, before any line has been found.
+| Constant | Outcome |
+|---|---|
+| ROI corridor, seed-window outer bound | **deleted** — 288/288 frames bit-identical, and not one of 764 seeds moved over 552 dashed-marking frames |
+| cross-lane cap | **measured per frame** (`_measure_lane_width_m`): each side's lateral offset at its own seed row, summed. Unmeasurable ⇒ cap off, never a guessed width |
+| slope gate | **kept** — the one lateral scale that cannot be measured instead of assumed; it runs in `_segment_info`, before any line has been found |
+
+⚠ Two traps behind that table, both written up with the numbers in the README:
+the deleted pair was inert because of the ±15° grade slack in `z_min`, **not**
+because innermost-first selection makes an outer bound redundant; and the slope
+gate looks removable on CARLA only because those routes have no junctions —
+**a gate that rejects stop lines and crosswalks cannot be evaluated on roads
+with none.** The failure the deleted pair was meant to prevent is real, predates
+their removal, and needs a flat-road bound instead (WWH-21).
 
 ## Critical Conventions
 
@@ -116,6 +118,6 @@ Config sections map 1:1 to pipeline stages:
 - `road_segmentation` — (currently empty, PIDNet uses argmax not threshold)
 - `line_segmentation` — `min_segment_length_near`, `min_segment_length_far`
 - `lane_segmentation` — `track_bands` only (continuity-tracking band count, clamped to >= 16 internally; independent of `lane_fitting.num_bands`). All other thresholds are derived from `pitch_estimation`'s `f_x` / `f_y` / `camera_height` — **not** from `w_real`, which this stage no longer takes
-- `lane_fitting` — `samples_per_meter` (geometry mode: z-uniform width-sample density in pitch_estimation, per meter of visible depth), `num_samples` (width-sample fallback when `samples_per_meter` is unset). `inner_chain_points` itself has no density tunables: shadowing + dense per-row inner envelope + fragment/junction purge, every kept row becomes a point — `lane_curve` (continuous gap-bridged polyline per side) is the model and pitch_estimation resamples it. `w_real` is inner-edge-to-inner-edge, so widths are measured on inner edges. Within this stage only `truncate_at_depth_jump` still takes it (paired-row z); the tracker above no longer does. **It is road-specific**: 3.25 comes from this dataset's double-yellow-left / single-white-right layout on a 3.5 m lane; a different marking combination re-derives it (see the config comment). Width sampling and pitch live in pitch_estimation (`sample_widths_from_curves` / `estimate_pitch_from_curves`)
-- `pitch_estimation` — `f_x`, `f_y`, `w_real`, `camera_height`, `camera_forward_offset` (`camera_height` feeds the lane_segmentation geometry; CARLA overrides `f_y=f_x` and `camera_height=2.4`), `method` (`windowed` default = local z-window Theil-Sen, no global residual filter; `spline` = global weighted UnivariateSpline with Theil-Sen MAD prefilter), `nearfield_w_real` (**default false**; per-frame near-field self-calibration of `w_real` from the ground-plane camera-height anchor at z 2–5 m, θ0-gated with bounded hold — `NearfieldWidthCalibrator`; the configured `w_real` becomes the fallback. Stages 1–3 no longer use it at all (see the lane_segmentation note above); within stage 4 only `truncate_at_depth_jump` does. Lane width really does vary per road: GT-projected truth is 3.29/3.55/3.31–3.39 on full_road and 3.34 vs 3.25 on the two hill routes, and the near-field estimate matches it to 8 mm where the gate opens. Off by default because a sustained grade tilts the body ±0.12° relative to the road, which pushes θ0 to the gate edge and sends 80–95 % of those frames to the fallback — see the config comment for the per-route numbers and the θ0-correction next step)
+- `lane_fitting` — `samples_per_meter` (geometry mode: z-uniform width-sample density in pitch_estimation, per meter of visible depth), `num_samples` (width-sample fallback when `samples_per_meter` is unset). `inner_chain_points` itself has no density tunables: shadowing + dense per-row inner envelope + fragment/junction purge, every kept row becomes a point — `lane_curve` (continuous gap-bridged polyline per side) is the model and pitch_estimation resamples it. `w_real` is inner-edge-to-inner-edge and **road-specific** (3.25 = this dataset's double-yellow-left / single-white-right on a 3.5 m lane; re-derive it per marking combination — the config comment has the table). Within this stage only `truncate_at_depth_jump` still takes it; width sampling and pitch live in pitch_estimation (`sample_widths_from_curves` / `estimate_pitch_from_curves`)
+- `pitch_estimation` — `f_x`, `f_y`, `w_real`, `camera_height`, `camera_forward_offset` (`camera_height` feeds the lane_segmentation geometry; CARLA overrides `f_y=f_x` and `camera_height=2.4`), `method` (`windowed` default = local z-window Theil-Sen, no global residual filter; `spline` = global weighted UnivariateSpline with Theil-Sen MAD prefilter), `nearfield_w_real` (**default false**; per-frame self-calibration of `w_real` against the near-field ground plane — `NearfieldWidthCalibrator`, with the configured `w_real` as the fallback. The depth window is derived from `f_y·h`, the estimate is the θ0-free Theil-Sen intercept `w_real_z0`, and a quality gate (row count / z-span / residual MAD) rejects noisy fits; the old fixed z∈[2,5] m window and |θ0|≤0.3° gate were properties of *this* camera and are gone (WWH-19, 2026-09-12). Lane width really does vary per road: GT-projected truth is 3.29/3.55/3.31–3.39 on full_road and 3.34 vs 3.25 on the two hill routes, and the estimate tracks it to 35–52 mm against 108–173 mm for a fixed constant. Off by default because the width gets measurably *better* while profile MAE gets 8–15 % *worse* — the same z-scale-against-pitch trade the `w_real` note above warns about, so it is a person's call rather than a default's. ⚠ The gate rejects noise, not a confidently wrong fit: on OpenLane's tram-track segment the residual MAD beats a healthy frame's while the width reads 1.58 m against a true 3.17 — that has to be caught upstream. Batch runs override with `--nearfield` / `--no-nearfield`)
 - `ground_truth` — **not a pipeline stage**: this is the reference the runners score against. `height_source` picks which column of `road_profile.csv` supplies the profile height — `auto` (default: `z_mesh` when present, else `z`), `analytic` (`z`, the OpenDRIVE centreline) or `mesh` (`z_mesh`, the downward ray-cast). Asking for `mesh` on a pre-WWH-14 dataset raises; only `auto` falls back. The collector's road surface deviates from the analytic centreline in a few localised sections and the camera sees it, so `mesh` is the better reference — see the module docstring in `libs/road_profile_gt.py` for the evidence, and **do not re-litigate it with absolute-height MAE**, which is dominated by a per-frame constant offset.

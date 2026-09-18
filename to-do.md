@@ -1,19 +1,16 @@
 # TODO — mono3D-two-plane-geo
 
 > **本檔只留「還沒做的事」。** 已完成的項目與被推翻的假說一律移出，論證留在
-> Linear 票（WWH-7 ~ WWH-17）與 commit 訊息裡。
+> Linear 票（WWH-7 ~ WWH-21）與 commit 訊息裡。
 >
-> 行號最後對照程式碼是 **2026-08-29**（WWH-17 之後），動到相關檔案時請順手更新。
+> 行號最後對照程式碼是 **2026-09-18**（WWH-19/#16 之後），動到相關檔案時請順手更新。
 >
-> **2026-08-22**：第三區塊改寫 —— CARLA 採集/標定/GT 全部定案。
-> **2026-08-27**：WWH-15 結案後整理 —— 移出三個已完成項（下坡兩個失效模式、
-> `infer_one` 無呼叫者、`infer_one` 不能選估測器）、刪除一個判定不重要項
-> （`_track_side` 效能）、補上 WWH-15 新增的常數、全檔行號重新對照。
-> 同日又完成：§2 失效文件參照、§C 死註解區塊（全 repo 掃過，沒有其他）、
-> §E config 舊參數 + README 重寫、§D 單元測試、以及**刪掉整條 legacy 分支**。
-> **2026-08-29**：WWH-17（近場 `w_real` 自標定，PR #14 已 merge）結案後整理 ——
-> 未解項 3「隱含車道寬變動」由推測升級為**逐幀量測**並改寫、§3b 補上
-> `NEARFIELD_*` / `THETA0_GATE_DEG`、`pitch_estimation.py` 行號重新對照。
+> **整理紀錄**（每次結案後把已完成項移出，詳情在 Linear 票與 commit）：
+> 2026-08-22 CARLA 採集/標定/GT 定案、2026-08-27 WWH-15 結案（並刪掉整條
+> legacy 分支、重寫 README、建立單元測試）、2026-08-29 WWH-17 結案。
+> **2026-09-18**：WWH-19 / PR #16 後的文件對齊 —— 未解項 3 的「θ0 修正」
+> 已完成改標、§3b 的 `NEARFIELD_*` 改成現行常數、§4「殘留 TODO」因為那條
+> TODO 已不存在而刪除、全檔行號重新對照。
 
 三大區塊：
 1. [`lane_segmentation.py` 優化](#lane_segmentationpy-優化)
@@ -109,14 +106,14 @@ repo 內論文背書（`Lin_&_Tsai_IEEETPAMI_1991.pdf`、`AI-Enhanced_Mono-View_
 （legacy 分支刪除後，原本的 L81 斜率閘門 `0.5*min_slope*(mid_y/img_height)` 與
 L245–246 的 `assoc_window`／`0.18*center_x` 已隨之消失。）
 
-- [ ] **L109 / L122 / L125** `_fit_x_of_y`：`last_n=8`、最少 `>= 4` 點
+- [ ] **L161 / L174 / L177** `_fit_x_of_y`：`last_n=8`、最少 `>= 4` 點
       （z(y) 在約 19 m 飽和之後就是靠這條，不是死路徑）
-- [ ] **L298**：`missed > max(4, track_bands // 3)`
-- [ ] **L311 / L313**：`missed >= 2`、`track_points[-2:]`
-- [ ] **L393**：`track_bands = max(int(track_bands), 16)`
+- [ ] **L384**：`missed > max(4, track_bands // 3)`
+- [ ] **L397 / L399**：`missed >= 2`、`track_points[-2:]`
+- [ ] **L481**：`track_bands = max(int(track_bands), 16)`
       （WWH-7 已把參數名 `num_bands` → `track_bands` 並在 config 設 16，
       所以「默默改成 16」的坑已緩解；但 clamp 本身仍未說明理由）
-- [ ] **`geometry.py` L31**：`min_y_margin=0.05`（WWH-15 抽出 `CameraGeometry`
+- [ ] **`geometry.py` L30**：`min_y_margin=0.05`（WWH-15 抽出 `CameraGeometry`
       時從 lane_segmentation 搬過去的）。⚠ 它決定 `z_at` 的飽和深度：
       `f_y*h/(0.05*512)` ≈ **19.2 m**，比直覺的「地平線附近才失效」近很多。
       已由 `tests/test_geometry.py::test_z_at_saturates_beyond_the_clamp_depth` 釘住
@@ -136,7 +133,7 @@ WWH-9 與 WWH-15 各新增一批常數。它們的註解**普遍比 lane_segment
 - [ ] **（WWH-15 新增）** `_ZJUMP_ABS_M = 3.0` / `_ZJUMP_FRAC = 0.3`（L247–248）、
       `_ZJUMP_EXTRAP_FACTOR = 1.5`（L255）—— 深度連續性截斷的門檻
 
-`paint_evidence.py`（**WWH-15 新增，L56–61**）
+`paint_evidence.py`（**WWH-15 新增，L62–67**）
 - [ ] `_STRIPE_M = 0.125`（CARLA 實測標線寬）、`_RIDGE_THR = 10.0`、`_PEAK_PX = 4`、
       `_FAR_CAP_PX = 60`、`_SEG_SAMPLES = 9`、`_TRUNC_MIN_RUN = 5`
       ⚠ **這批是刻意不進 config 的**（見第 1 點的設計爭議）；列在這裡是為了
@@ -145,22 +142,19 @@ WWH-9 與 WWH-15 各新增一批常數。它們的註解**普遍比 lane_segment
 `pitch_estimation.py`
 - [ ] `WINDOW_FRAC = 0.15` / `WINDOW_MIN_M = 1.0`（L7–8）—— 這兩個是 windowed
       估測器**明示的空間解析度**，最該進 config
-- [ ] 函式預設值：`z_cap_m=45.0`（L358、L427）、`min_valid_range_m=0.5`（L357、L426）、
-      `min_window_points=4`（L361）、`n_pitch_samples=200`（L362、L431）、
-      `resid_mad_k=5.0`（L428，spline 路徑）
-- [ ] **（WWH-17 新增）** `NEARFIELD_Z_MIN_M = 2.0` / `NEARFIELD_Z_MAX_M = 5.0`
-      （L28–29）、`THETA0_GATE_DEG = 0.3`（L30）、`NEARFIELD_MAX_HOLD_M`
-      （L39，＝量測窗遠端）/ `NEARFIELD_MIN_RUN_M = 0.5`（L40）、
-      幀數退路 `NEARFIELD_MAX_HOLD_FRAMES = 40` / `_MIN_RUN_FRAMES = 4`（L43–44）
+- [ ] 函式預設值：`z_cap_m=45.0`（L452、L521）、`min_valid_range_m=0.5`（L451、L520）、
+      `min_window_points=4`（L455）、`n_pitch_samples=200`（L456、L525）、
+      `resid_mad_k=5.0`（L522，spline 路徑）
+- [ ] **（WWH-17，WWH-19 改寫）** 視窗推導 `NEARFIELD_Z_LO_FACTOR = 1.2` /
+      `_MIN_ROWS = 40` / `_CURV_R_M = 1500` / `_CURV_TOL = 0.005` / `_Z_HI_FACTOR_CAP = 3.0`
+      （L32–36）、品質閘門 `_MIN_POINTS = 8` / `_MIN_SPAN_FRAC = 0.5` /
+      `_RESID_PX = 2.0` / `_THETA0_MAX_DEG = 3.0`（L50–53）、採納政策
+      `_MIN_RUN_M = 0.5` / `_MIN_RUN_FRAMES = 2`（L63–64）
+      （舊的 `NEARFIELD_Z_MIN_M`/`_Z_MAX_M`/`THETA0_GATE_DEG`/`_MAX_HOLD_*` 已隨
+      WWH-19 一起刪掉 —— 寫死的窗口跟 θ0 閘門都綁死本專案這台相機）
       ⚠ 這批和 `paint_evidence.py` 同屬「有幾何推導、刻意留常數」那一類
-      （窗口上界由曲率誤差 `z²/(2·R·h)` 定、閘門由容許偏差 `w·θ0·z̄/h` 定、
-      保持上限＝量測窗遠端）。列在這裡是清單完整，不是說要搬
-
-### 4. 殘留 TODO 與死參數
-（`roi_far` / `roi_near` / `min_slope` / `lane_band_tolerance` 已全部刪除，
-連同整條 legacy 分支。）
-
-- [ ] **L85** TODO：`replace 1.0 multiplier with p95 lateral offset from CARLA GT` 尚未完成
+      （窗口上界由曲率誤差 `z²/(2·R·h)` 與取樣列數取較近者）。
+      列在這裡是清單完整，不是說要搬
 
 ---
 
@@ -183,7 +177,7 @@ WWH-9 與 WWH-15 各新增一批常數。它們的註解**普遍比 lane_segment
 
 ## 中優先
 
-### D. 單元測試（已有 48 個，覆蓋面仍窄）
+### D. 單元測試（已有 55 個，覆蓋面仍窄）
 `tests/` 已建立（2026-08-27）：投影模型、量測階段（含退化情形）、三道閘門的
 邊界案例。`uv run --no-sync python -m pytest`，約 2 秒，不需影像/權重/GPU。
 **刻意不測**追蹤器與擬合鏈的整體行為 —— 那種測試會很脆，準度本來就該由
@@ -339,38 +333,41 @@ WWH-15 之前的 baseline（供對照）：mean 0.2545 / 0.4633 / 0.2143，>2° 
   （debug/ 不進版控）。⚠ `debug/dump_pitch_curves.py` 原本是 pipeline 第三份
   拷貝、WWH-15 三道閘門沒生效，已改走 `infer_one`
 
-### 3. 車道寬逐路段變動：已量到（WWH-17），剩下的是自標定的四步後續
+### 3. 車道寬逐路段變動：已量到（WWH-17），剩下三步後續
 
-~~原本的未解項「隱含車道寬隨世界位置變動、要離線量漆緣分辨真假」~~ —— **已由
-WWH-17 回答**：`estimate_w_real_nearfield` 用近場相機高錨逐幀量出來，
-GT 正向投影的隱含寬 `W_implied = w_meas·z_gt/f_x` 獨立仲裁，證實**寬度是真的
-在變、不是 pipeline 量錯**：full_road 逐 `road_id` 3.29 / 3.55 / 3.31–3.39，
-down_hile 3.336、uphile 3.254（同一條 road 18 的對向兩車道）。單一常數 3.25
-在 road 43 就是 z 尺度 **−8%**。閘門開處近場估計對真值 **8 mm ~ 2 cm**。
+**寬度是真的在變，不是 pipeline 量錯**（GT 正向投影的隱含寬
+`W_implied = w_meas·z_gt/f_x` 獨立仲裁）：full_road 逐 `road_id`
+3.29 / 3.55 / 3.31–3.39、down_hile 3.336、uphile 3.254。單一常數 3.25 在
+road 43 就是 z 尺度 **−8%**。
 
-`nearfield_w_real` 目前 **false**（能力已在，`--nearfield` 可覆寫）。剩下四步，
-**依序**做：
+`nearfield_w_real` 目前 **false**（能力已在，`--nearfield` 可覆寫）。
+剩下三步，**依序**做：
 
-- [ ] **1. θ0 修正**（最高優先）：持續坡上車身相對路面有方向性俯仰
-      （`road_pitch − cam_pitch`：下坡 −0.11°、上坡 +0.12°），θ0 被頂到閘門
-      邊緣 → 那些路段 80–95% 的幀退回 fallback。θ0 是**量到的**量，不該只拿來
-      當閘門：改用 Theil-Sen 截距 `w_real_z0`（本來就 θ0-free）取代
-      `w_real_med`，重跑三路線驗收後再決定 `nearfield_w_real` 的預設值
-- [ ] **2. 局部性 fallback**：閘門長期關閉時退回的仍是 config 常數。改用已採納值
+- [x] ~~**θ0 修正**~~ 已完成（WWH-19，commit `a475f5e`）：主估計改用
+      本來就 θ0-free 的 Theil-Sen 截距 `w_real_z0`，θ0 降為物理上界
+      （|θ0|≤3°），閘門改成品質判定。逐路段誤差 51→46 mm（CARLA）、
+      189→35 mm（OpenLane）；退回 fallback 的比例 80–95% → 5/31/35%。
+      預設仍 false：寬度變準但 profile MAE 退步 8–15%，這個取捨要人判
+- [ ] **1. 局部性 fallback**：閘門長期關閉時退回的仍是 config 常數。改用已採納值
       的滾動中位數，但**中位數必須有局部性**（例如只取最近 30–50 m）——
       否則只是把「路況特定常數」換成「路線特定常數」（full_road 全程中位數會
       混到 road 43 的 3.53，對 road 41 反而更差）
-- [ ] **3. 寬度階躍遲滯 ＋ 跨路制資料集**：換道／換路制是**橫向**事件，θ0 閘門
-      看不見。加「新估計與保持值差 > 5% 時，採納門檻提高到 2 m」，並收一條
-      Town04/06 的跨路制路線（標線 3.85–4.25）才驗得到；同時可測 stage 1–4 的
-      config 先驗在 +23% 偏差下的容忍邊界（目前只實測過 +8.6%，無感）
-- [ ] **4. w(s) 路線剖面**：解**幀內**近-遠混淆（遠場目前仍用近場常數外推）。
+- [ ] **2. 寬度階躍遲滾 ＋ 跨路制資料集**：換道／換路制是**橫向**事件，品質
+      閘門也看不見（換道後的擬合一樣干淨）。加「新估計與保持值差 > 5% 時，
+      採納門檻提高到 2 m」，並收一條 Town04/06 的跨路制路線（標線 3.85–4.25）
+      才驗得到；同時可測 stage 1–4 的 config 先驗在 +23% 偏差下的容忍邊界
+      （目前只實測過 +8.6%，無感）
+- [ ] **3. w(s) 路線剖面**：解**幀內**近-遠混淆（遠場目前仍用近場常數外推）。
       把逐幀估計按里程拼起來離線重算。收益上限已量出（road 41 殘餘 +0.019），
       量級較小所以排最後
 
 ⚠ **不要用 MAE 判定 `w_real` 對錯**（WWH-17 又踩一次）：down_hile 量到 3.328、
-真值 3.336（差 8 mm），MAE 卻變差 6.4%。三條路線一致呈現「w 越小 MAE 越好」。
+真值 3.336（差 8 mm），MAE 却變差 6.4%。三條路線一致呈現「w 越小 MAE 越好」。
 仲裁一律用 `W_implied` 或零平均高度殘差，MAE 只用來報告精度 —— 見下面第 4 項。
+
+⚠ **品質閘門擋得住雜訊，擋不住「自信地錯」**：OpenLane 舊金山電車軌那段追蹤器
+鎖到鐵軌上，殘差 MAD 0.001 比正常幀的 0.002 還小，寬度却量成 1.58 m（真值 3.17）。
+這要在上游的選線解，不是加閘門能解的。
 
 ### 4. 其他
 

@@ -20,9 +20,10 @@ line_segmentation:
   min_segment_length_far: 0   # Length threshold at the top of the image (far / uphill); threshold is interpolated linearly between these two values based on segment mid-y
 
 lane_segmentation:
-  # Association tolerance, seed window, slope gates and model memory are all
-  # derived from the camera geometry in pitch_estimation (f_x/f_y/camera_height/
-  # w_real); the old hand-tuned min_slope / lane_band_tolerance are gone.
+  # Association tolerance, slope gates and model memory are all derived from
+  # pitch_estimation's f_x / f_y / camera_height. NOT from w_real: this stage
+  # does not take a lane width at all (2026-09-15) — the one width it needs,
+  # the cross-lane cap, it measures per frame.
   track_bands: 16  # Horizontal bands for near-to-far continuity tracking (internally clamped to >= 16); independent of lane_fitting.num_bands
 
 lane_fitting:

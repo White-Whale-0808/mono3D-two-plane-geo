@@ -18,6 +18,7 @@ Monocular road pitch estimation from a single camera. The pipeline runs five seq
   - [2. Batch Inference on a Dataset](#2-batch-inference-on-a-dataset)
   - [3. Unit Tests](#3-unit-tests)
   - [4. CARLA Real-Time Test (currently broken)](#4-carla-real-time-test-currently-broken)
+  - [5. OpenLane as a Second Dataset](#5-openlane-as-a-second-dataset)
 - [Ground Truth](#ground-truth)
 - [Configuration Reference](#configuration-reference)
 - [Critical Conventions](#critical-conventions)
@@ -78,13 +79,13 @@ Three of the five lateral constants are gone, each on measured evidence. The abl
 | slope gate | kept | The one lateral scale that *cannot* be measured instead of assumed — it runs in `_segment_info`, before any line has been found |
 | association tolerance | open | Its justification is unsettled: ELSED endpoint noise is a *pixel*-domain quantity (already covered by `_TOL_PX_FLOOR`), confusion with the next lane is a *metre*-domain one, and the two imply opposite scaling with depth |
 
-> ⚠ Why those two were inert is not the obvious reason. It is **not** that innermost-first selection makes an outer bound redundant — the band loop returns at the *first* band holding any candidate, so a bound that empties a band does change which band the seed comes from. Both were written as `px_max_at(3.25, y)`, i.e. against `z_min` with its ±15° grade slack, which in flat-road metres admits `3.25·z_at/z_min`. The slack starts at 6 m: on CARLA that is 5.4 m of real lateral distance at 8 m depth and 8.6 m at 10 m; on OpenLane, whose bottom image row already sees 6.85 m, the bound was never a 3.25 m barrier anywhere in the image.
+> ⚠ **Why the deleted pair was inert is not the obvious reason.** It is *not* that innermost-first selection makes an outer bound redundant — the band loop returns at the first band holding any candidate, so a bound that empties a band does change where the seed comes from. Both were written as `px_max_at(3.25, y)`, i.e. against `z_min` with its ±15° grade slack, so in flat-road metres they admit `3.25·z_at/z_min`. The slack starts at 6 m: on CARLA that is 8.6 m of real lateral distance at z=10; on OpenLane, whose bottom image row already sees 6.85 m, the bound was never a 3.25 m barrier anywhere in the image.
 
-> ⚠ The failure they were meant to prevent is real and **predates their removal**: of the 552 dashed frames, 28 of 512 (5.5%) seed on the *adjacent* lane and measure a 5–12 m "lane", identically with and without the bound; 23 of those 28 already produce no pitch at all. A fix needs a bound derived from the flat-road depth rather than the grade-padded one, tracked as WWH-21 — re-adding these two thresholds would not cover it.
+> ⚠ **The failure they were meant to prevent is real, and predates their removal.** Of the 552 dashed frames, 28 of 512 (5.5 %) seed on the *adjacent* lane and measure a 5–12 m "lane" — identically with and without the bound, and 23 of the 28 already produce no pitch at all. The fix needs a bound derived from the flat-road depth rather than the grade-padded one (WWH-21); re-adding these two would not cover it.
 
-> ⚠ The slope gate is the cautionary one. On CARLA it looks removable — 6 frames touched, range slightly *better* without it. On OpenLane, disabling it costs 2 whole frames and 14.65 m of median range. Those three Town03 routes have almost no junctions, and **a gate that rejects stop lines and crosswalks cannot be evaluated on roads that have none.**
+> ⚠ **The slope gate is the cautionary one.** On CARLA it looks removable — 6 frames touched, range slightly *better* without it. On OpenLane, disabling it costs 2 whole frames and 14.65 m of median range. Those three Town03 routes have almost no junctions, and **a gate that rejects stop lines and crosswalks cannot be evaluated on roads that have none.**
 
-> A hand-tuned fallback for un-calibrated cameras (`min_slope` / `lane_band_tolerance` / `roi_near`) used to sit alongside this and was removed on 2026-08-27: every caller supplied the full calibration, so it was a second implementation that nothing ran and no test covered. Its thresholds were fitted to one dataset anyway, so a genuinely different camera would need them re-derived rather than reused — which is what the geometry path does on its own.
+> A hand-tuned fallback for un-calibrated cameras (`min_slope` / `lane_band_tolerance` / `roi_near`) was removed on 2026-08-27: every caller supplied the full calibration, so it was a second implementation nothing ran and no test covered. Its thresholds were fitted to one dataset anyway — a genuinely different camera needs them re-derived, which is what the geometry path does on its own.
 
 ---
 
@@ -129,6 +130,14 @@ mono3D-two-plane-geo/
 │   ├── test_pitch_estimation.py                # Metric stage against known grades
 │   ├── test_paint_evidence.py                  # Paint guards' edge cases
 │   └── test_depth_jump.py                      # Depth-continuity guard's edge cases
+├── openlane_module/                            # OpenLane → this project's dataset format, + the tools
+│   │                                           # that measure what that data can verify. See its README
+│   ├── convert_openlane.py                     # Annotations → images/ + measurements.csv + road_profile.csv
+│   ├── frame_tags.py                           # Per-frame variables: weather, case tags, curvature, GT width
+│   ├── frame_check.py                          # Which coordinate frame the GT `xyz` is in
+│   ├── gt_width_noise.py                       # Noise floor of the lane-width GT itself (~12 mm)
+│   ├── measure_paint_inset.py                  # Measures the paint inset directly, instead of assuming it
+│   └── nearfield_feasibility.py                # Whether the near-field anchor fits a high camera's image
 ├── debug/                                      # Diagnostic and prototype scripts (gitignored, not part of the pipeline)
 ├── scripts/
 │   └── setup_elsed.py                          # Clone + patch the ELSED C++ extension
@@ -281,6 +290,18 @@ Produces:
 
 The plot filenames carry the dataset name so that running several datasets back to back does not overwrite them; the CSV paths still follow the config.
 
+Three flags override the config, so both sides of a toggle can be swept without editing it between runs (and without a second copy of the pipeline):
+
+```bash
+python -m utils.batch_inference_road_lane_segmentation --dataset inference_datasets/<dataset> --no-nearfield --tag baseline
+```
+
+| Flag | Overrides |
+|---|---|
+| `--dataset <DIR>` | `input.image_batch_path` and `csv_io.measurements_csv` |
+| `--nearfield` / `--no-nearfield` | `pitch_estimation.nearfield_w_real` |
+| `--tag <suffix>` | Output filename suffix, so back-to-back runs do not overwrite each other |
+
 Frames that produce no output are skipped and their ids printed. **A skipped frame is not necessarily a bug** — the method needs two inner lane edges, so intersections and unmarked crests legitimately give nothing, and the paint guards will abstain rather than measure a kerb.
 
 ---
@@ -314,6 +335,21 @@ python carla_module/realtime_test.py [--host HOST] [--port PORT] [--map MAP] [--
 > ⚠ **This path does not currently run.** `realtime_test.py` and `carla_visualization.py` still import `collect_points_from_segments`, `piecewise_linear_fit`, `compute_lane_widths` and `fit_two_plane_model`, all of which were removed in WWH-7 / WWH-9. Reviving it means migrating to `lane_curve` / `sample_widths_from_curves` / `estimate_pitch_from_curves` and adding the three evidence guards. Two further notes for whoever does it: `realtime_test.py` mounts its camera at 2.4 m and overrides `camera_height`, and it overrides `f_y = f_x` because the CARLA camera has square pixels; and its `w_real` means inner-edge to inner-edge, same as everywhere else.
 
 Data **collection** from CARLA (`carla_module/get_carlaDataset.py`, `pick_route.py`) is unaffected and works.
+
+---
+
+### 5. OpenLane as a Second Dataset
+
+Every threshold in this pipeline was originally fitted on three CARLA routes through one Town03 map. `openlane_module/` converts [OpenLane](https://github.com/OpenDriveLab/OpenLane) (3D lane annotations over the Waymo Open Dataset) into the same three-file dataset format, so a gate can be tested on roads with junctions, real paint and a different camera mount. **The pipeline and the GT module are unchanged** — every compatibility problem is solved inside the converter.
+
+```bash
+python openlane_module/convert_openlane.py --openlane <DIR> --out <OUT> --no-images
+python openlane_module/frame_tags.py        # per-frame variables -> CSV, for picking strata
+```
+
+That second camera is what exposed thresholds silently written against *this* mount — the near-field calibration window contained zero rows on a 2.1 m camera, and the two deleted lateral bounds above were never a barrier anywhere in its image. It also supplies the junction frames that showed the slope gate is *not* removable.
+
+`openlane_module/README.md` has the per-file table, the three design decisions and the licence terms. ⚠ **CC BY-NC-SA + Waymo Non-Commercial: images and derived images must not be committed.**
 
 ---
 
@@ -375,6 +411,7 @@ pitch_estimation:
   camera_height: 1.08           # camera mount height above the road (m); also enables geometry mode
   camera_forward_offset: 1.5    # camera mount offset ahead of the vehicle origin (m), for GT distance alignment
   method: windowed              # "windowed" (default) or "spline"
+  nearfield_w_real: false       # measure w_real per frame instead of using the constant above
 
 ground_truth:
   height_source: "auto"         # "auto" | "analytic" | "mesh"
@@ -391,6 +428,19 @@ csv_io:
 ```
 
 > ⚠ **`w_real = 3.25` is specific to this road's marking layout** — double yellow on the left, single white on the right, on a 3.5 m lane. Because `w_real` is inner-edge to inner-edge, each side is inset from the boundary-centre width by a different amount (left 0.1875, right 0.0625, total 0.25). On the same 3.5 m lane: single+single → 3.375, double+single → **3.25**, double+double → 3.125. Re-derive it per road; do not carry 3.25 to another map or another lane. And determine it from height/geometry, never by minimising MAE — MAE trades the z scale against pitch error and its optimum is systematically pulled low. Measured on 2026-09-15 over all three routes: the GT-implied truth is **3.3226 m** (`w_px·z_gt/f_x`, 2,011 frames) while profile MAE is minimised at **3.25**, and using the true width costs +0.020 MAE (+8.5%) on every route. The gap is not noise — a wrong `w_real` is cancelling a second systematic error somewhere else, the same pattern as the 2026-07-27 finding where it cancelled a missing camera forward offset.
+
+**`nearfield_w_real: true` measures the width instead of assuming it.** Lane width really does vary per road, so a single constant is wrong somewhere: the GT-projected truth is 3.29 / 3.55 / 3.31–3.39 across `full_road`'s three `road_id`s, and a fixed 3.25 is an 8 % depth-scale error on the widest of them. `NearfieldWidthCalibrator` reads it per frame off the near-field ground plane, anchored on the known camera height:
+
+| Piece | How it is set |
+|---|---|
+| Depth window | Derived from `f_y·h` — the nearer of a curvature bound and a row-count bound. The old fixed z ∈ [2, 5] m was a property of *this* 1.08 m camera; on OpenLane's 2.1 m mount that window contains zero rows, so the self-calibration silently never ran |
+| Estimate | The Theil-Sen **intercept** `w_real_z0`, which is free of the body pitch θ0. Per-section error against GT: 46 mm on CARLA and 35 mm on OpenLane, against 108 / 173 mm for the fixed constant |
+| Gate | Quality only — row count, z-span, residual MAD, and \|θ0\| ≤ 3° as a physical bound. The old \|θ0\| ≤ 0.3° gate rejected 93 % of frames on a high camera, and gating on θ0 is redundant once the estimate is θ0-free |
+| Adoption | Held across a run of passing frames; a rejected frame reuses the last adopted value, and the configured `w_real` is the fallback |
+
+It is **off by default** because the width gets measurably better while profile MAE gets 8–15 % *worse* — exactly the z-scale-against-pitch trade the warning above describes. That is a person's call, not a default's.
+
+> ⚠ The gate rejects a *noisy* fit, not a *confidently wrong* one. On OpenLane's San Francisco tram-track segment the tracker locks onto the rails: they are straight, parallel and bright, so the residual MAD (0.001 m) beats a healthy frame's (0.002 m) while the width reads 1.58 m against a true 3.17 m. That failure has to be caught upstream, in line selection.
 
 ---
 

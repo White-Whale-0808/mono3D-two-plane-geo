@@ -16,6 +16,7 @@ pipeline 與 GT 模組**一行未改** —— 相容性全部在轉換器裡解�
 | `frame_tags.py` | 逐幀變因表（天氣/時段/地景、六個 case tag、實測曲率、標線組合、GT 寬） |
 | `frame_check.py` | 判別 `xyz` 在哪個座標系（投影殘差：光學系 0.90 px vs 車體系 11.75 px） |
 | `gt_width_noise.py` | 車道寬 GT 自身的雜訊，兩個獨立方法（都得到約 12 mm） |
+| `measure_paint_inset.py` | **直接量**漆線內縮 inset（GT 標中心、`w_real` 要內緣，差一個 inset）。不經過 pipeline 的寬度所以不循環；`--carla` 用已知真值驗量測方法本身 |
 | `nearfield_feasibility.py` | 近場錨在高相機上的可行性：視窗在不在影像裡、移遠要付多少代價 |
 
 全部從 repo 根目錄執行，預設讀 `D:/datasets/openlane`：
@@ -32,6 +33,10 @@ python openlane_module/frame_tags.py            # -> debug/outputs/openlane_fram
 python openlane_module/frame_check.py
 python openlane_module/gt_width_noise.py
 python openlane_module/nearfield_feasibility.py
+
+# 漆線內縮：Tier A 全部，或用 CARLA 的已知真值驗量測方法
+python -m openlane_module.measure_paint_inset
+python -m openlane_module.measure_paint_inset --carla inference_datasets/<dataset> --limit 40
 ```
 
 ## 三個設計決定

@@ -7,24 +7,6 @@ from scipy.interpolate import UnivariateSpline
 WINDOW_FRAC = 0.15
 WINDOW_MIN_M = 1.0
 
-# Near-field self-calibration: ground-plane depth window (m) and the θ0 gate.
-# The window's lower bound clears the image margin, the upper bound limits the
-# road-curvature error (relative error z²/(2·R·h) — sub-percent at 5 m for
-# R ≥ 1 km). The gate rejects frames whose w(z) trend says the near field is
-# not the support plane (grade transitions, and on a real car suspension
-# transients). It admits at most w·θ0·z̄/h ≈ 0.055 m (1.7%) of width bias
-# while sitting well above the θ0 noise floor on steady sections (full_road
-# scan 2026-08-28: steady-section w std 0.2%, θ0 tracking dpitch/ds at
-# corr 0.77).
-#
-# Known limitation on SUSTAINED grades (up/down_hile acceptance 2026-08-28):
-# the vehicle body sits at a small direction-dependent pitch relative to the
-# road (measured road_pitch − cam_pitch: −0.11° descending, +0.12° climbing),
-# which pushes θ0 to ~±0.25-0.32° for whole sections — so the gate rejects
-# 80-95% of frames there, and the ones it admits still carry a ±0.03-0.05 m
-# residual. The principled fix is to CORRECT with the measured θ0 (the
-# Theil-Sen intercept `w_real_z0` is already θ0-free) rather than only gate
-# on it; that is the next step, not done here.
 # ---------------------------------------------------------------- near field
 # The window is DERIVED from the camera, not hand-set (WWH-19, 2026-09-12).
 # The old fixed z ∈ [2, 5] m is a property of this project's 1.08 m camera: on
@@ -290,9 +272,14 @@ class NearfieldWidthCalibrator:
     cumulative travel distance before each frame; without it distance is
     unknown, so no value is held across frames (see the NEARFIELD_MIN_RUN_*
     note — the old frame-count fallbacks baked in this project's 0.1 m/frame
-    capture rate and silently misfired at 1 m/frame). Stages 1–4 keep the
-    configured w_real for their threshold derivations (insensitive at the
-    few-percent level); only the metric stage consumes the calibrated value.
+    capture rate and silently misfired at 1 m/frame).
+
+    Only the metric stage consumes the calibrated value. Stages 1-3 do not
+    take a lane width at all (2026-09-15); within stage 4 only
+    truncate_at_depth_jump still takes one, and it is handed the CONFIGURED
+    w_real — it runs before update() is even called, and it decides whether a
+    depth jump means hidden road, so it must not move with an estimate read
+    off the very curves it is checking.
     """
 
     def __init__(self, f_x, f_y, image_height, camera_height, w_real_fallback):
