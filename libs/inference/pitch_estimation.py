@@ -51,27 +51,44 @@ NEARFIELD_MIN_POINTS = 8
 NEARFIELD_MIN_SPAN_FRAC = 0.5
 NEARFIELD_RESID_PX = 2.0
 NEARFIELD_THETA0_MAX_DEG = 3.0
-# Hold/adopt policy (full_road acceptance 2026-08-28, verified against the
-# GT-projected implied width): a near-field measurement describes the road
-# patch it was taken on, so a held value expires once the vehicle has driven
-# past that patch — the window's own far edge, `nearfield_window`'s z_hi, which
-# is now per-camera rather than a constant. And adoption requires the gate
-# to stay open across a minimum stretch of travel: at a curvature INFLECTION
-# the w(z) trend crosses zero while the bias is at its largest (θ0 is blind
-# there for an isolated frame — s161 adopted a 2.9 reading that way), whereas
-# genuine support-plane stretches pass for many metres in a row.
+# Adopt policy (full_road acceptance 2026-08-28, verified against the
+# GT-projected implied width): adoption requires the gate to stay open across
+# a minimum stretch of travel: at a curvature INFLECTION the w(z) trend crosses
+# zero while the bias is at its largest (θ0 is blind there for an isolated
+# frame — s161 adopted a 2.9 reading that way), whereas genuine support-plane
+# stretches pass for many metres in a row.
+#
+# A run survives ONE failed frame (2026-09-18). A near field that flickers —
+# every other frame with no rows — never completed an unbroken run: OpenLane
+# 17612 output nothing for 30 frames while its readings were good (it now
+# adopts 2.99 m against 2.88 true). One failure is a dropped observation;
+# two in a row mean the gate really closed. Replayed offline over all recorded
+# frames (CARLA 2,421 + OpenLane Tier A 488), width error vs truth:
+#     rule                         CARLA med/p90   OpenLane frames with a width
+#     unbroken run                 2.0 / 6.2 %     409
+#     survives one failed frame    1.8 / 6.2 %     444
+#     any pass within z_hi         1.9 / 10.1 %    444   <- rejected: at CARLA's
+#       0.125 m/frame a gate that reopens for a few frames after several
+#       failures is the inflection case, and a pass from before confirmed it
 NEARFIELD_MIN_RUN_M = 0.5
 NEARFIELD_MIN_RUN_FRAMES = 2       # a run is at least two frames, whatever the spacing
-# The hold bound is the window's own far edge (the patch that was measured is
-# behind us once we have driven past it), so it is now per-camera, not a
-# constant — see `nearfield_window`.
-#
+NEARFIELD_RUN_MAX_DROPOUT = 1      # consecutive failed frames a run survives
 # ⚠ The frame-count fallbacks are gone (WWH-19). They assumed ~0.1 m/frame,
 # which is this project's CARLA capture; OpenLane runs at 0.96 m/frame, where
-# the old 40-frame hold meant 38 m instead of 5 m and the 0.5 m minimum run was
-# satisfied by a SINGLE frame — the protection was silently off on both ends.
-# Without `advance_to`, distance is unknown, so each frame now stands alone:
-# a passing frame is adopted for itself and nothing is held across frames.
+# the old 0.5 m minimum run was satisfied by a SINGLE frame. Without
+# `advance_to` the run is judged on frame count alone.
+#
+# Hold policy (stage C, decided 2026-09-18): within one continuous sequence the
+# last adopted value is held for as long as it takes — however stale — and how
+# stale it is gets reported (`hold_m` / `hold_frames`) instead of being silently
+# swapped for a constant. A frame with nothing adopted yet gets no width from
+# here (`status` "no_anchor", `reason` says why); the pipeline then falls to
+# the config's `last_resort_lane_width`, FLAGGED as such, or outputs no pitch.
+# The calibrator itself knows no constant. The previous rule — hold only
+# across the window's far edge, then fall back to the configured w_real —
+# replaced a measured-but-old width with an assumed one, which is never closer:
+# lane width does drift along a road (full_road road 41: 3.39 → 3.31), but the
+# assumed constant is off by 108–173 mm against the measured 35–52 mm.
 
 
 def back_project_widths(widths, f_x, f_y, image_height, w_real):
@@ -256,46 +273,62 @@ def nearfield_widths_from_curves(left_curve, right_curve, f_y, camera_height,
 
 
 class NearfieldWidthCalibrator:
-    """Per-frame w_real from the near field: quality-gated, bounded hold.
+    """Per-frame w_real from the near field: quality-gated, held, no fallback.
 
     Wraps `estimate_w_real_nearfield` into the stateful policy the pipeline
     uses. A frame passes when the fit is of usable quality (`quality_ok`, see
     the NEARFIELD_* constants); its width — the θ0-free intercept — is adopted
-    once the gate has stayed open across NEARFIELD_MIN_RUN_M of travel AND at
-    least NEARFIELD_MIN_RUN_FRAMES frames. A rejected frame reuses the last
-    adopted value while the vehicle is still within the window's far edge of
-    the last accepted patch; beyond that the value is stale — width
-    demonstrably changes across long rejected stretches (full_road road 41:
-    3.39 → 3.31) — and the configured w_real takes over as fallback.
+    once a run of passes spans NEARFIELD_MIN_RUN_M of travel AND at least
+    NEARFIELD_MIN_RUN_FRAMES passing frames; the run survives up to
+    NEARFIELD_RUN_MAX_DROPOUT consecutive failed frames. Any other frame
+    reuses the last
+    adopted value, however long ago it was adopted; before the first adoption
+    there is no value at all and update() returns None (see the hold-policy
+    note above the constants — the last-resort constant is the pipeline's
+    business, not this class's).
 
-    One instance per image sequence. Call `advance_to(dist_m)` with the
-    cumulative travel distance before each frame; without it distance is
-    unknown, so no value is held across frames (see the NEARFIELD_MIN_RUN_*
-    note — the old frame-count fallbacks baked in this project's 0.1 m/frame
-    capture rate and silently misfired at 1 m/frame).
+    One instance per CONTINUOUS image sequence: the instance is what defines
+    "continuous", so a held value never crosses into another sequence. Call
+    `advance_to(dist_m)` with the cumulative travel distance before each frame;
+    it is needed for the minimum run in metres and for `hold_m`.
 
-    Only the metric stage consumes the calibrated value. Stages 1-3 do not
-    take a lane width at all (2026-09-15); within stage 4 only
-    truncate_at_depth_jump still takes one, and it is handed the CONFIGURED
-    w_real — it runs before update() is even called, and it decides whether a
-    depth jump means hidden road, so it must not move with an estimate read
-    off the very curves it is checking.
+    `sequence=False` is for a lone image (single-image inference): there is no
+    run to wait for, so a frame that passes the quality gate is used for
+    itself. The inflection protection the run gives is lost — there is nothing
+    else to judge that frame against.
+
+    After each update(), for reporting:
+      status       "measured" (adopted this frame) | "held" | "no_anchor"
+      reason       why this frame was not measured: "no_nearfield_rows"
+                   (nothing reached the near window), "quality_gate",
+                   "run_too_short" (passed, run not long enough yet);
+                   None when measured
+      hold_frames  frames since the adoption in use (0 when measured)
+      hold_m       metres since it; None without odometry
+
+    Only the metric stage consumes the value: stages 1-3 take no lane width
+    (2026-09-15), and truncate_at_depth_jump works in lane-width units.
     """
 
-    def __init__(self, f_x, f_y, image_height, camera_height, w_real_fallback):
+    def __init__(self, f_x, f_y, image_height, camera_height, *, sequence=True):
         self.f_x = f_x
         self.f_y = f_y
         self.image_height = image_height
         self.camera_height = camera_height
         self.z_lo, self.z_hi, self.curvature_ok = nearfield_window(
             f_y, camera_height, image_height)
-        self.max_hold_m = self.z_hi
-        self.w_real_fallback = float(w_real_fallback)
-        self.w_real = float(w_real_fallback)   # value the last update() used
+        self.sequence = bool(sequence)
+        self.w_real = None                     # value the last update() returned
+        self.status = None
+        self.reason = None
+        self.hold_frames = None
+        self.hold_m = None
         self.last_estimate = None              # raw estimator dict, last frame
         self._dist = None                      # advance_to state (m)
         self._frame = -1
         self._run_start = None                 # (dist, frame) of gate-run start
+        self._run_passes = 0                   # passing frames in the run
+        self._dropout = 0                      # consecutive failures inside it
         self._last_adopt = None                # (dist, frame) of last adoption
         self._held = None
 
@@ -310,7 +343,8 @@ class NearfieldWidthCalibrator:
         return self._dist - since[0]
 
     def update(self, left_curve, right_curve):
-        """Feed one frame's lane curves; returns the w_real to use for it."""
+        """Feed one frame's lane curves; returns the w_real to use for it, or
+        None when this sequence has not produced one yet (see `status`)."""
         self._frame += 1
         widths = nearfield_widths_from_curves(
             left_curve, right_curve, self.f_y, self.camera_height,
@@ -319,29 +353,52 @@ class NearfieldWidthCalibrator:
             widths, self.f_x, self.f_y, self.image_height, self.camera_height,
             z_near_min=self.z_lo, z_near_max=self.z_hi)
         self.last_estimate = est
-        if est is not None and est["quality_ok"]:
+        if est is None or not est["quality_ok"]:
+            self.reason = "no_nearfield_rows" if est is None else "quality_gate"
+            self._dropout += 1
+            if self._dropout > NEARFIELD_RUN_MAX_DROPOUT:
+                self._run_start = None
+        else:
             if self._run_start is None:
                 self._run_start = (self._dist, self._frame)
+                self._run_passes = 0
+            self._dropout = 0
+            self._run_passes += 1
             span_m = self._span_m(self._run_start)
-            frames = self._frame - self._run_start[1] + 1
-            run_ok = (frames >= NEARFIELD_MIN_RUN_FRAMES
-                      and (span_m is None or span_m >= NEARFIELD_MIN_RUN_M))
+            run_ok = (not self.sequence
+                      or (self._run_passes >= NEARFIELD_MIN_RUN_FRAMES
+                          and (span_m is None or span_m >= NEARFIELD_MIN_RUN_M)))
             if run_ok:
                 self._held = est["w_real_z0"]
                 self._last_adopt = (self._dist, self._frame)
-        else:
-            self._run_start = None
-        if self._held is not None:
-            span_m = self._span_m(self._last_adopt)
-            # No odometry -> the patch cannot be tracked, so only the frame that
-            # produced the value may use it; nothing is carried forward.
-            fresh = (span_m <= self.max_hold_m if span_m is not None
-                     else self._frame == self._last_adopt[1])
-            if fresh:
-                self.w_real = self._held
-                return self.w_real
-        self.w_real = self.w_real_fallback
+                self.reason = None
+            else:
+                self.reason = "run_too_short"
+        if self._held is None:
+            self.status = "no_anchor"
+            self.w_real = self.hold_frames = self.hold_m = None
+            return None
+        self.hold_frames = self._frame - self._last_adopt[1]
+        self.hold_m = self._span_m(self._last_adopt)
+        self.status = "measured" if self.hold_frames == 0 else "held"
+        self.w_real = self._held
         return self.w_real
+
+
+def resolve_lane_width(calibrator, left_curve, right_curve,
+                       last_resort_lane_width=None):
+    """This frame's metric lane width and where it came from.
+
+    Feeds the calibrator (measured / held), and only when its sequence has no
+    measurement at all falls to the last-resort constant, marked
+    "last_resort" so a pitch on an assumed scale is never passed off as a
+    measured one. Returns (width or None, status); status is the calibrator's,
+    or "last_resort". None with "no_anchor" means: output no pitch.
+    """
+    w = calibrator.update(left_curve, right_curve)
+    if w is None and last_resort_lane_width is not None:
+        return float(last_resort_lane_width), "last_resort"
+    return w, calibrator.status
 
 
 def sample_widths_from_curves(left_curve, right_curve, num_samples, *,

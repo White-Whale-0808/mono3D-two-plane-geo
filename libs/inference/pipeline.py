@@ -21,7 +21,9 @@ from libs.inference.line_segmentation import detect_lines_with_elsed
 from libs.inference.lane_fitting      import (inner_chain_points, refine_inner_points,
                                               lane_curve, truncate_at_depth_jump)
 from libs.inference.paint_evidence    import filter_paint_segments, truncate_at_evidence_break
-from libs.inference.pitch_estimation  import estimate_pitch_from_curves
+from libs.inference.pitch_estimation  import (estimate_pitch_from_curves,
+                                              NearfieldWidthCalibrator, _empty_result,
+                                              resolve_lane_width)
 
 # ---------------------------------------------------------------------------
 # Pipeline
@@ -31,12 +33,13 @@ def infer_one(
     model, image_path, device, resize_size,
     min_segment_length_near, min_segment_length_far,
     num_samples,
-    f_x, f_y, w_real, camera_height,
+    f_x, f_y, camera_height,
     *,
     samples_per_meter: float = None,
     track_bands: int = 16,
     method: str = "windowed",
     w_real_calibrator=None,
+    last_resort_lane_width: float = None,
     return_debug: bool = False,
 ):
     """Run the full pipeline on a single image.
@@ -46,19 +49,26 @@ def infer_one(
     f_x, f_y, camera_height
         Camera calibration. Required — the tracker's thresholds and the
         paint-evidence probe windows are all derived from these three.
-    w_real
-        Inner-edge-to-inner-edge lane width (m). Used by exactly two places:
-        truncate_at_depth_jump (stage 4) and the metric stage. Stages 1-3
-        take no lane width at all (2026-09-15).
     w_real_calibrator
-        Optional pitch_estimation.NearfieldWidthCalibrator (one instance per
-        image sequence). When given, the metric stage uses its per-frame
-        near-field width instead of the configured w_real. Nothing upstream
-        changes: stages 1-3 take no lane width at all, and the one stage-4
-        consumer (truncate_at_depth_jump) is deliberately handed the
-        configured value — it runs before update() is called, and must not
-        move with an estimate read off the curves it is checking. The value
-        actually used for the metric stage is returned as "w_real_used".
+        pitch_estimation.NearfieldWidthCalibrator, one instance per continuous
+        image sequence: the lane width is MEASURED from the near field, never
+        configured (stage C, 2026-09-18). Omit it for a lone image and a
+        one-shot calibrator (sequence=False) is used. Only the metric stage
+        needs the width — stages 1-3 take none, truncate_at_depth_jump works
+        in lane-width units.
+    last_resort_lane_width
+        Assumed lane width (m) for a frame whose sequence has not measured
+        one yet — the config's `last_resort_lane_width`. Such frames are
+        marked w_real_status = "last_resort" so their pitch, on an assumed
+        scale, is never mistaken for a measured one. None: output no pitch
+        for them instead (status "no_anchor").
+
+    Returns {"pitch_curve", "w_real_used", "w_real_status", "w_real_reason",
+    "w_real_hold_frames", "w_real_hold_m"}. When the sequence has no measured
+    width yet, the last-resort width is used (status "last_resort"), or with
+    none given w_real_used is None, the status is "no_anchor" and the pitch
+    curve is the empty (degenerate) result. The reason says why this frame
+    could not be measured itself (see NearfieldWidthCalibrator).
     return_debug
         If True, also return a dict with intermediate values.
     """
@@ -82,7 +92,7 @@ def infer_one(
         track_bands=track_bands,
         f_x=f_x, f_y=f_y, camera_height=camera_height)
 
-    # 4. lane fitting — per-row inner-envelope chain (w_real is inner-edge
+    # 4. lane fitting — per-row inner-envelope chain (the width is inner-edge
     # to inner-edge; the tracker keeps whole marking groups for evidence),
     # refined to sub-pixel, cut at the first sustained paint-evidence break
     # (crest occlusion boundary), then a continuous gap-bridged curve per side
@@ -97,21 +107,31 @@ def infer_one(
     # depth-continuity guard: real paint beyond a crest occlusion is
     # still a DIFFERENT lane section — never join it to the near chain
     left_points, right_points = truncate_at_depth_jump(
-        left_points, right_points, f_x, w_real, resized_image.height)
+        left_points, right_points, f_x, resized_image.height)
     left_curve  = lane_curve(left_points)
     right_curve = lane_curve(right_points)
 
     # 5. pitch estimation — widths from the curves → continuous pitch(z)
     # (`method` selects windowed Theil-Sen, the default, or the global spline).
-    # The metric scale is the calibrator's near-field width when one is given.
-    w_real_metric = (w_real_calibrator.update(left_curve, right_curve)
-                     if w_real_calibrator is not None else w_real)
-    pitch_curve = estimate_pitch_from_curves(
-        left_curve, right_curve, f_x, f_y, resized_image.height, w_real_metric,
-        num_samples=num_samples, samples_per_meter=samples_per_meter,
-        method=method)
+    # The metric scale is the near-field width; before the sequence has one,
+    # the last-resort constant (flagged), or no pitch at all.
+    cal = w_real_calibrator
+    if cal is None:
+        cal = NearfieldWidthCalibrator(f_x, f_y, resized_image.height,
+                                       camera_height, sequence=False)
+    w_real_metric, status = resolve_lane_width(
+        cal, left_curve, right_curve, last_resort_lane_width)
+    if w_real_metric is None:
+        pitch_curve = {**_empty_result(), "widths": np.empty((0, 2))}
+    else:
+        pitch_curve = estimate_pitch_from_curves(
+            left_curve, right_curve, f_x, f_y, resized_image.height, w_real_metric,
+            num_samples=num_samples, samples_per_meter=samples_per_meter,
+            method=method)
 
-    result = {"pitch_curve": pitch_curve, "w_real_used": w_real_metric}
+    result = {"pitch_curve": pitch_curve, "w_real_used": w_real_metric,
+              "w_real_status": status, "w_real_reason": cal.reason,
+              "w_real_hold_frames": cal.hold_frames, "w_real_hold_m": cal.hold_m}
     if return_debug:
         degenerate = pitch_curve["pitch_at"] is None or len(pitch_curve["z_samples"]) == 0
         result["debug"] = {

@@ -29,11 +29,10 @@ num_samples               = config["lane_fitting"]["num_samples"]
 samples_per_meter         = config["lane_fitting"].get("samples_per_meter")
 f_x                       = config["pitch_estimation"]["f_x"]
 f_y                       = config["pitch_estimation"]["f_y"]
-w_real                    = config["pitch_estimation"]["w_real"]
 camera_height             = config["pitch_estimation"].get("camera_height")
+last_resort_lane_width    = config["pitch_estimation"].get("last_resort_lane_width")
 camera_offset_m           = config["pitch_estimation"].get("camera_forward_offset", 0.0)
 pitch_method              = config["pitch_estimation"].get("method", "windowed")
-nearfield_w_real          = config["pitch_estimation"].get("nearfield_w_real", False)
 gt_height_source          = config.get("ground_truth", {}).get("height_source", "auto")
 input_csv                 = config["csv_io"]["input_dir"]
 output_csv                = config["csv_io"]["output_dir"]
@@ -56,18 +55,15 @@ def _parse_args(argv=None):
     """CLI overrides for the config defaults.
 
     Everything defaults to the config, so a bare run is unchanged. The
-    overrides exist so one acceptance sweep can cover several routes and
-    both sides of a toggle without editing the config between runs (and
-    without a second copy of the pipeline — see infer_one's comment).
+    overrides exist so one acceptance sweep can cover several routes
+    without editing the config between runs (and without a second copy of
+    the pipeline — see infer_one's comment). One dataset dir is one
+    continuous sequence: the lane-width calibrator lives for exactly one run.
     """
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", type=Path, default=None,
                     help="資料集目錄（含 images/ 與 measurements.csv）；"
                          "省略則用 config 的路徑")
-    ap.add_argument("--nearfield", dest="nearfield", action="store_true",
-                    default=None, help="強制開啟近場 w_real 自標定")
-    ap.add_argument("--no-nearfield", dest="nearfield", action="store_false",
-                    help="強制關閉近場 w_real 自標定")
     ap.add_argument("--tag", default="",
                     help="輸出檔名後綴，連跑多組才不會互相覆蓋")
     return ap.parse_args(argv)
@@ -86,6 +82,30 @@ def _compute_mae(pitch_curve, frame_id, gt):
     return round(float(np.abs(ps[valid] - gt_deg[valid]).mean()), 4)
 
 
+def _report_width_status(df):
+    """車道寬來源統計：量到 / 沿用 / 最後手段常數 / 無錨（後兩者＝本片段還沒量到過）。"""
+    st = df["w_real_status"].dropna()
+    if not len(st):
+        return
+    counts = st.value_counts()
+    print("lane width: " + "  ".join(
+        f"{k}={int(counts.get(k, 0))}" for k in ("measured", "held", "last_resort", "no_anchor")))
+    not_measured = df.loc[df["w_real_status"] != "measured", "w_real_reason"].dropna()
+    if len(not_measured):
+        print("  not measured this frame, by reason: " + "  ".join(
+            f"{k}={v}" for k, v in not_measured.value_counts().items()))
+    for st, what in (("last_resort", "pitch on the ASSUMED last_resort_lane_width"),
+                     ("no_anchor", "no pitch output")):
+        ids = df.loc[df["w_real_status"] == st, "frame_id"].astype(int)
+        if len(ids):
+            print(f"  {st} frames ({what}): {ids.tolist()}")
+    hold_m = pd.to_numeric(df["w_real_hold_m"], errors="coerce")
+    held = hold_m[df["w_real_status"] == "held"].dropna()
+    if len(held):
+        print(f"  held value age: median={held.median():.1f} m  "
+              f"p90={held.quantile(0.9):.1f} m  max={held.max():.1f} m")
+
+
 def main(argv=None):
     args = _parse_args(argv)
     # CLI 覆寫（沒給就是 config 的值）
@@ -96,8 +116,6 @@ def main(argv=None):
     else:
         in_csv, meas_csv = input_csv, measurements_csv
         image_dir_str = image_batch_path
-    use_nearfield = (nearfield_w_real if args.nearfield is None
-                     else args.nearfield)
     out_csv  = _tagged(output_csv, args.tag)
     prob_csv = _tagged(problem_csv, args.tag)
 
@@ -113,16 +131,19 @@ def main(argv=None):
     z_vis_max_col   = [pd.NA] * n_total
     profile_mae_col = [pd.NA] * n_total
     w_real_used_col = [pd.NA] * n_total
+    w_status_col    = [pd.NA] * n_total
+    w_reason_col    = [pd.NA] * n_total
+    w_hold_f_col    = [pd.NA] * n_total
+    w_hold_m_col    = [pd.NA] * n_total
     n_skip_pipeline = 0
     skip_frame_ids  = []
 
-    # 近場自標定：一條路線一個 calibrator（θ0 閘門 + 沿用上一有效值），
-    # config 的 w_real 降級為 fallback；關閉時行為與舊版完全相同
-    calibrator = None
-    if use_nearfield:
-        calibrator = NearfieldWidthCalibrator(
-            f_x, f_y, resize_size[0], camera_height, w_real)
-        print("nearfield w_real self-calibration: ON")
+    # 車道寬一律由近場量測（階段 C，2026-09-18）：一個資料集目錄＝一段連續片段＝
+    # 一個 calibrator。量不到就沿用本片段上一次量到的值；本片段從沒量到過的幀
+    # 才用 config 的 last_resort_lane_width（沒設就不輸出 pitch）。狀態與原因
+    # 寫進 CSV 並在結尾統計，用了最後手段的幀一眼可辨。
+    calibrator = NearfieldWidthCalibrator(
+        f_x, f_y, resize_size[0], camera_height)
 
     image_batch_dir = Path(image_dir_str)
     n_missing_image = 0
@@ -135,7 +156,7 @@ def main(argv=None):
             n_missing_image += 1
             continue
 
-        if calibrator is not None and hasattr(row, "collect_dist_m"):
+        if hasattr(row, "collect_dist_m"):
             calibrator.advance_to(float(row.collect_dist_m))
 
         try:
@@ -147,12 +168,20 @@ def main(argv=None):
             result = infer_one(
                 model, str(image_path), device, resize_size,
                 min_segment_length_near, min_segment_length_far,
-                num_samples, f_x, f_y, w_real, camera_height,
+                num_samples, f_x, f_y, camera_height,
                 samples_per_meter=samples_per_meter,
                 track_bands=track_bands, method=pitch_method,
-                w_real_calibrator=calibrator)
+                w_real_calibrator=calibrator,
+                last_resort_lane_width=last_resort_lane_width)
             pitch_curve = result["pitch_curve"]
-            w_real_used_col[i] = round(float(result["w_real_used"]), 4)
+            if result["w_real_used"] is not None:
+                w_real_used_col[i] = round(float(result["w_real_used"]), 4)
+            w_status_col[i] = result["w_real_status"]
+            w_reason_col[i] = result["w_real_reason"] or pd.NA
+            if result["w_real_hold_frames"] is not None:
+                w_hold_f_col[i] = result["w_real_hold_frames"]
+            if result["w_real_hold_m"] is not None:
+                w_hold_m_col[i] = round(float(result["w_real_hold_m"]), 2)
 
             if pitch_curve["pitch_at"] is not None:
                 z_vis_min_col[i] = round(float(pitch_curve["z_visible_min"]), 2)
@@ -169,11 +198,15 @@ def main(argv=None):
     df["z_visible_min"] = z_vis_min_col
     df["z_visible_max"] = z_vis_max_col
     df["profile_mae"]   = profile_mae_col
-    if use_nearfield:
-        df["w_real_used"] = w_real_used_col
+    df["w_real_used"]        = w_real_used_col
+    df["w_real_status"]      = w_status_col
+    df["w_real_reason"]      = w_reason_col
+    df["w_real_hold_frames"] = w_hold_f_col
+    df["w_real_hold_m"]      = w_hold_m_col
     df.to_csv(out_csv, index=False)
 
     print(f"pipeline_skip={n_skip_pipeline}, missing_image={n_missing_image}, total={n_total}")
+    _report_width_status(df)
     print(f"skipped frame ids: {skip_frame_ids}")
 
     mae = pd.to_numeric(df["profile_mae"], errors="coerce").dropna()

@@ -405,7 +405,7 @@ def _camera_report(cam_bp: carla.ActorBlueprint, cfg: dict) -> dict:
 def _verdicts(records: list[dict], cfg: dict) -> tuple[list[str], dict]:
     """把量測值和 config 對照，產生人可讀的判定。"""
     pitch_cfg  = cfg.get("pitch_estimation", {}) or {}
-    cfg_w      = float(pitch_cfg.get("w_real",        3.216))
+    cfg_w      = float(pitch_cfg.get("last_resort_lane_width",        3.216))
     cfg_h      = float(pitch_cfg.get("camera_height", 1.08))
     cfg_ratio  = cfg_w / cfg_h
 
