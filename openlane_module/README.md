@@ -18,6 +18,8 @@ pipeline 與 GT 模組**一行未改** —— 相容性全部在轉換器裡解�
 | `gt_width_noise.py` | 車道寬 GT 自身的雜訊，兩個獨立方法（都得到約 12 mm） |
 | `measure_paint_inset.py` | **直接量**漆線內縮 inset（GT 標中心、`w_real` 要內緣，差一個 inset）。不經過 pipeline 的寬度所以不循環；`--carla` 用已知真值驗量測方法本身 |
 | `nearfield_feasibility.py` | 近場錨在高相機上的可行性：視窗在不在影像裡、移遠要付多少代價 |
+| `export_updown.py` | 官方「上下坡」標籤（`test/1000_updown.txt`，5,518 幀 / 33 段）**不篩選**全部轉出；轉換器會踢掉的原因寫進 `drop_reasons` 欄，剖面只用漆線算（路緣不當路面高度）。另出 `index.csv`（逐段）與 `frames.csv`（逐幀） |
+| `select_updown.py` | 從上面的輸出挑片段：去掉大部分是路緣（無漆線幀 ≥ 50%）與只有單邊（兩側漆線幀 < 25%）的段，以目錄連結放進新根目錄，不複製影像 |
 
 全部從 repo 根目錄執行，預設讀 `D:/datasets/openlane`：
 
@@ -37,6 +39,10 @@ python openlane_module/nearfield_feasibility.py
 # 漆線內縮：Tier A 全部，或用 CARLA 的已知真值驗量測方法
 python -m openlane_module.measure_paint_inset
 python -m openlane_module.measure_paint_inset --carla inference_datasets/<dataset> --limit 40
+
+# 官方上下坡子集：全部轉出，再挑兩側都有漆線的片段（WWH-22）
+python -m openlane_module.export_updown --openlane D:/datasets/openlane --out D:/datasets/openlane_updown
+python -m openlane_module.select_updown --src D:/datasets/openlane_updown --out D:/datasets/openlane_updown_twoside
 ```
 
 ## 三個設計決定
