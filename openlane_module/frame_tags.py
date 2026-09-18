@@ -40,9 +40,21 @@ TIER_A_SAGITTA_MAX = 0.15
 
 
 def load_cases(ol_root):
-    """OpenLane 官方逐幀 case tag（curve / night / intersection / ...）。"""
+    """OpenLane 官方逐幀 case tag（curve / night / intersection / ...）。
+
+    找不到就直接拋。空的 dict 會讓 `tier_a` 在存取 `df.tag_intersection` 時才
+    掛掉 —— 那已經是掃完整個 validation split（約一萬幀、數分鐘）之後的事了。
+    能在開始前查的就不要留到結束後炸。
+    """
+    case_dir = Path(ol_root) / "test"
+    files = sorted(case_dir.glob("1000_*.txt"))
+    if not files:
+        raise FileNotFoundError(
+            f"找不到官方 case tag 檔：{case_dir}/1000_*.txt。"
+            " tier_a() 需要 tag_intersection / tag_curve / tag_night，"
+            " 請確認 --openlane 指到的是解開後的 OpenLane 根目錄。")
     cases = {}
-    for p in (Path(ol_root) / "test").glob("1000_*.txt"):
+    for p in files:
         tag = p.stem.replace("1000_", "").replace("_case", "")
         s = set()
         for line in open(p, encoding="utf-8"):

@@ -148,6 +148,10 @@ def paint_group_edges(gray, v, u0, px_per_m, inner_sign):
 def run_openlane(args):
     import cv2
     fl = pd.read_csv(args.frame_list, dtype={'frame': str})
+    # --frame-list 選的是「幀」，不是「段」。只挑段的話，一份完整（非 Tier A）
+    # 的轉換會把那些段裡的虛線/路口/彎道幀通通混進 inset 統計裡 —— 那正是
+    # Tier A 篩掉的東西。語意與 convert_openlane.convert_segment 的 keep 一致。
+    keep = set(zip(fl.segment, fl.frame))
     segs = sorted(fl.segment.unique())
     if args.limit_segments:
         segs = segs[:args.limit_segments]
@@ -159,6 +163,8 @@ def run_openlane(args):
             continue
         meas = pd.read_csv(seg_dir / 'measurements.csv', dtype={'source_frame': str})
         for r in meas.itertuples():
+            if (seg, r.source_frame) not in keep:
+                continue
             js = pathlib.Path(args.openlane) / 'validation' / seg / f'{r.source_frame}.json'
             img_path = seg_dir / 'images' / f'{int(r.frame_id):06d}.png'
             if not (js.exists() and img_path.exists()):
