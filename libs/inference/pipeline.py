@@ -43,15 +43,22 @@ def infer_one(
 
     Parameters
     ----------
-    f_x, f_y, w_real, camera_height
+    f_x, f_y, camera_height
         Camera calibration. Required — the tracker's thresholds and the
-        paint-evidence probe windows are all derived from it.
+        paint-evidence probe windows are all derived from these three.
+    w_real
+        Inner-edge-to-inner-edge lane width (m). Used by exactly two places:
+        truncate_at_depth_jump (stage 4) and the metric stage. Stages 1-3
+        take no lane width at all (2026-09-15).
     w_real_calibrator
         Optional pitch_estimation.NearfieldWidthCalibrator (one instance per
         image sequence). When given, the metric stage uses its per-frame
-        near-field width instead of the configured w_real; stages 1-4 keep
-        the configured value for threshold derivation either way. The value
-        actually used is returned as "w_real_used".
+        near-field width instead of the configured w_real. Nothing upstream
+        changes: stages 1-3 take no lane width at all, and the one stage-4
+        consumer (truncate_at_depth_jump) is deliberately handed the
+        configured value — it runs before update() is called, and must not
+        move with an estimate read off the curves it is checking. The value
+        actually used for the metric stage is returned as "w_real_used".
     return_debug
         If True, also return a dict with intermediate values.
     """
