@@ -290,17 +290,20 @@ Produces:
 
 The plot filenames carry the dataset name so that running several datasets back to back does not overwrite them; the CSV paths still follow the config.
 
-Three flags override the config, so both sides of a toggle can be swept without editing it between runs (and without a second copy of the pipeline):
+Two flags override the config, so several datasets can be run back to back without editing it between runs (and without a second copy of the pipeline):
 
 ```bash
-python -m utils.batch_inference_road_lane_segmentation --dataset inference_datasets/<dataset> --no-nearfield --tag baseline
+python -m utils.batch_inference_road_lane_segmentation --dataset inference_datasets/<dataset> --tag baseline
 ```
+
+One dataset directory is one **continuous sequence**: the lane width measured on one frame is carried to the next ones only within it (see the near-field section below).
 
 | Flag | Overrides |
 |---|---|
 | `--dataset <DIR>` | `input.image_batch_path` and `csv_io.measurements_csv` |
-| `--nearfield` / `--no-nearfield` | `pitch_estimation.nearfield_w_real` |
 | `--tag <suffix>` | Output filename suffix, so back-to-back runs do not overwrite each other |
+
+The output CSV records where each frame's lane width came from: `w_real_used`, `w_real_status` (`measured` / `held` / `last_resort` / `no_anchor`), `w_real_reason` (why this frame could not be measured itself) and `w_real_hold_m` / `w_real_hold_frames` (how old a held width is). The run ends with a tally of the statuses and lists the `last_resort` frames (pitch on the **assumed** width) and the `no_anchor` frames (no pitch).
 
 Frames that produce no output are skipped and their ids printed. **A skipped frame is not necessarily a bug** — the method needs two inner lane edges, so intersections and unmarked crests legitimately give nothing, and the paint guards will abstain rather than measure a kerb.
 
@@ -407,11 +410,10 @@ lane_fitting:
 pitch_estimation:
   f_x: 512                      # horizontal focal length (px, after resize)
   f_y: 455                      # vertical focal length (px, after resize)
-  w_real: 3.25                  # inner-edge-to-inner-edge lane width (m) — see the warning below
+  last_resort_lane_width: 3.25  # assumed width, ONLY before a sequence's first measurement (flagged); was `w_real`
   camera_height: 1.08           # camera mount height above the road (m); also enables geometry mode
   camera_forward_offset: 1.5    # camera mount offset ahead of the vehicle origin (m), for GT distance alignment
   method: windowed              # "windowed" (default) or "spline"
-  nearfield_w_real: false       # measure w_real per frame instead of using the constant above
 
 ground_truth:
   height_source: "auto"         # "auto" | "analytic" | "mesh"
@@ -427,18 +429,25 @@ csv_io:
   problem_mae_threshold: 2.0
 ```
 
+> On 2026-09-18 (stage C) `w_real` was renamed `last_resort_lane_width` and demoted to a last resort — the width is measured, see below; the constant is used only before a sequence's first measurement, and flagged. What follows is why the constant cannot be trusted as a parameter.
+>
 > ⚠ **`w_real = 3.25` is specific to this road's marking layout** — double yellow on the left, single white on the right, on a 3.5 m lane. Because `w_real` is inner-edge to inner-edge, each side is inset from the boundary-centre width by a different amount (left 0.1875, right 0.0625, total 0.25). On the same 3.5 m lane: single+single → 3.375, double+single → **3.25**, double+double → 3.125. Re-derive it per road; do not carry 3.25 to another map or another lane. And determine it from height/geometry, never by minimising MAE — MAE trades the z scale against pitch error and its optimum is systematically pulled low. Measured on 2026-09-15 over all three routes: the GT-implied truth is **3.3226 m** (`w_px·z_gt/f_x`, 2,011 frames) while profile MAE is minimised at **3.25**, and using the true width costs +0.020 MAE (+8.5%) on every route. The gap is not noise — a wrong `w_real` is cancelling a second systematic error somewhere else, the same pattern as the 2026-07-27 finding where it cancelled a missing camera forward offset.
 
-**`nearfield_w_real: true` measures the width instead of assuming it.** Lane width really does vary per road, so a single constant is wrong somewhere: the GT-projected truth is 3.29 / 3.55 / 3.31–3.39 across `full_road`'s three `road_id`s, and a fixed 3.25 is an 8 % depth-scale error on the widest of them. `NearfieldWidthCalibrator` reads it per frame off the near-field ground plane, anchored on the known camera height:
+**The lane width is measured, not assumed.** Lane width really does vary per road, so a single constant is wrong somewhere: the GT-projected truth is 3.29 / 3.55 / 3.31–3.39 across `full_road`'s three `road_id`s, and a fixed 3.25 is an 8 % depth-scale error on the widest of them. `NearfieldWidthCalibrator` reads it per frame off the near-field ground plane, anchored on the known camera height:
 
 | Piece | How it is set |
 |---|---|
 | Depth window | Derived from `f_y·h` — the nearer of a curvature bound and a row-count bound. The old fixed z ∈ [2, 5] m was a property of *this* 1.08 m camera; on OpenLane's 2.1 m mount that window contains zero rows, so the self-calibration silently never ran |
 | Estimate | The Theil-Sen **intercept** `w_real_z0`, which is free of the body pitch θ0. Per-section error against GT: 46 mm on CARLA and 35 mm on OpenLane, against 108 / 173 mm for the fixed constant |
 | Gate | Quality only — row count, z-span, residual MAD, and \|θ0\| ≤ 3° as a physical bound. The old \|θ0\| ≤ 0.3° gate rejected 93 % of frames on a high camera, and gating on θ0 is redundant once the estimate is θ0-free |
-| Adoption | Held across a run of passing frames; a rejected frame reuses the last adopted value, and the configured `w_real` is the fallback |
+| Adoption | Adopted after a run of passing frames (≥ 2 frames and ≥ 0.5 m), so a lone clean-looking frame at a curvature inflection is not trusted. The run survives one failed frame, not two |
+| No measurement | User decision, 2026-09-18. Within a sequence a rejected frame reuses the last adopted value however old it is, and reports its age. Only before the sequence's first adoption is `last_resort_lane_width` used, with the frame marked `last_resort`; without that key the frame outputs no pitch (`no_anchor`) |
 
-It is **off by default** because the width gets measurably better while profile MAE gets 8–15 % *worse* — exactly the z-scale-against-pitch trade the warning above describes. That is a person's call, not a default's.
+It used to be an opt-in flag, off by default, because the width gets measurably better while profile MAE gets 8–15 % *worse* — exactly the z-scale-against-pitch trade the warning above describes. The user ruled (2026-09-15) that adapting to real road widths comes first and the MAE cause is chased separately, so it is now the only source of the width.
+
+> ⚠ Holding without a bound means a held width goes stale when the road changes under it. OpenLane segment 13356 widens from 3.07 to 3.79 m (inner edges) over 22 m; it is measured once, at 2.71 m against 3.11 true (−13 %), and only three later frames pass the quality gate, each two or more failures apart, so that reading is held to the end (−29 % by then). No adoption rule fixes it — the frames that would have are rejected by the quality gate itself.
+>
+> A run survives one failed frame (2026-09-18). Before that an unbroken run was required, and segment 17612 — whose near field has no rows every other frame — never completed one and output nothing for all 30 frames, while its readings were good; it now adopts 2.99 m against 2.88. Allowing any earlier pass within the window instead was tried and rejected: on CARLA's 0.125 m frame spacing it let an inflection reading through and the width error p90 rose 6.2 → 10.1 %.
 
 > ⚠ The gate rejects a *noisy* fit, not a *confidently wrong* one. On OpenLane's San Francisco tram-track segment the tracker locks onto the rails: they are straight, parallel and bright, so the residual MAD (0.001 m) beats a healthy frame's (0.002 m) while the width reads 1.58 m against a true 3.17 m. That failure has to be caught upstream, in line selection.
 

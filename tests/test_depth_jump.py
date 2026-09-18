@@ -9,13 +9,13 @@ row gap in continuous road, where the depth also advances a long way.
 import numpy as np
 import pytest
 
-from libs.inference.lane_fitting import _ZJUMP_ABS_M, truncate_at_depth_jump
+from libs.inference.lane_fitting import _ZJUMP_ABS_LANES, truncate_at_depth_jump
 from tests import synthetic as syn
 
 
 def _truncate(rows_and_depths):
     left, right = syn.paired_rows(rows_and_depths)
-    return truncate_at_depth_jump(left, right, syn.F_X, syn.W_REAL, syn.IMG_H)
+    return truncate_at_depth_jump(left, right, syn.F_X, syn.IMG_H)
 
 
 def _depths(left, right):
@@ -37,7 +37,8 @@ def test_a_large_row_gap_on_continuous_road_is_not_a_jump():
     """Regression: down_hile 209.
 
     Rows 400 and 316 with depths 2.5 and 6.0 m. The 3.5 m step clears the
-    absolute gate (_ZJUMP_ABS_M = 3.0), and the first version truncated here
+    absolute gate (3.0 m, now _ZJUMP_ABS_LANES lane widths), and the first
+    version truncated here
     and lost the frame. But 84 rows of continuous road genuinely advance that
     far: the local-plane extrapolation z1·(y1-cy)/(y2-cy) is exactly 6.0, so
     a continuous surface reaches it and there is nothing hidden.
@@ -45,7 +46,7 @@ def test_a_large_row_gap_on_continuous_road_is_not_a_jump():
     y1, z1 = 400.0, 2.5
     y2 = syn.CY + (y1 - syn.CY) * z1 / 6.0        # z_exp == 6.0 by construction
     z2 = 6.0
-    assert z2 - z1 > _ZJUMP_ABS_M                 # the absolute gate IS tripped
+    assert (z2 - z1) / syn.W_REAL > _ZJUMP_ABS_LANES   # the absolute gate IS tripped
     left, right = _truncate([(y1, z1), (y2, z2)])
     assert len(left) == 2 and len(right) == 2
 
@@ -69,7 +70,7 @@ def test_unpaired_points_inside_the_gap_are_cut_too():
     left = np.vstack([left, dangling])
 
     left_out, right_out = truncate_at_depth_jump(
-        left, right, syn.F_X, syn.W_REAL, syn.IMG_H)
+        left, right, syn.F_X, syn.IMG_H)
     assert len(left_out) == 1 and len(right_out) == 1
     assert left_out[0][1] == pytest.approx(y1)
 
@@ -85,5 +86,12 @@ def test_the_near_side_of_the_jump_is_kept_not_the_far_side():
 def test_an_empty_side_is_returned_unchanged():
     left, right = syn.paired_rows([(400.0, 5.0)])
     out_l, out_r = truncate_at_depth_jump(
-        left, np.empty((0, 2)), syn.F_X, syn.W_REAL, syn.IMG_H)
+        left, np.empty((0, 2)), syn.F_X, syn.IMG_H)
     assert len(out_l) == 1 and len(out_r) == 0
+
+
+def test_the_guard_needs_no_lane_width():
+    """The guard works in lane widths (stage C, 2026-09-18), so it takes no
+    width argument; its absolute floor carries over the old 3.0 m at the
+    3.25 m it was tuned with, so behaviour on that road is unchanged."""
+    assert _ZJUMP_ABS_LANES * 3.25 == pytest.approx(3.0)

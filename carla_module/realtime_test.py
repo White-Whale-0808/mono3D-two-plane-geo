@@ -144,7 +144,7 @@ def run_pipeline(
     num_samples = cfg["lane_fitting"]["num_samples"]
     f_x         = cfg["pitch_estimation"]["f_x"]
     f_y         = cfg["pitch_estimation"]["f_y"]   # 已覆蓋為 512
-    w_real      = cfg["pitch_estimation"]["w_real"]
+    w_real      = cfg["pitch_estimation"]["last_resort_lane_width"]
 
     # 階段 1：道路分割（PIDNet，argmax 取代 sigmoid+threshold）
     resized_image, pred_mask = predict_road_from_pil(

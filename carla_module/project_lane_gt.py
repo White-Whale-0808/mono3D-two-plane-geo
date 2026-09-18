@@ -217,7 +217,7 @@ def _load_w_real(override: Optional[float]) -> float:
         path = _PROJECT_ROOT / "config" / "inference_road_lane_segmentation.yaml"
         with open(path, encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
-        return float((cfg.get("pitch_estimation", {}) or {}).get("w_real", 3.216))
+        return float((cfg.get("pitch_estimation", {}) or {}).get("last_resort_lane_width", 3.216))
     except Exception as exc:                                    # noqa: BLE001
         print(f"[警告] 讀不到 config，w_real 改用內建預設 3.216：{exc}")
         return 3.216

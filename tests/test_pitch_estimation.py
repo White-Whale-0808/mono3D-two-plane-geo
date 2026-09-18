@@ -13,6 +13,7 @@ from libs.inference.pitch_estimation import (NearfieldWidthCalibrator,
                                              back_project_widths,
                                              estimate_pitch_from_curves,
                                              estimate_w_real_nearfield,
+                                             resolve_lane_width,
                                              sample_widths_from_curves)
 from tests import synthetic as syn
 
@@ -127,33 +128,110 @@ def _fed(cal, dist, pitch_deg, z_near=2.0):
     return cal.update(*_curves(pitch_deg, z_near, 30.0))
 
 
-def test_calibrator_adopts_holds_and_expires():
-    """Full policy over a drive: fallback → run → adopt → hold → expire."""
-    cal = NearfieldWidthCalibrator(syn.F_X, syn.F_Y, syn.IMG_H, syn.CAM_H,
-                                   w_real_fallback=3.5)
-    # curves that never reach the near window: nothing to measure, fallback
-    assert _fed(cal, 0.0, 0.0, z_near=8.0) == pytest.approx(3.5)
+def test_calibrator_has_no_width_until_it_measures_one():
+    """No configured fallback (stage C): before the first adoption there is
+    no width, and the reason says why this frame was not measured."""
+    cal = NearfieldWidthCalibrator(syn.F_X, syn.F_Y, syn.IMG_H, syn.CAM_H)
+    # curves that never reach the near window: nothing to measure
+    assert _fed(cal, 0.0, 0.0, z_near=8.0) is None
+    assert (cal.status, cal.reason) == ("no_anchor", "no_nearfield_rows")
     # gate opens, but adoption waits for MIN_RUN metres of open gate
-    assert _fed(cal, 0.1, 0.0) == pytest.approx(3.5)
+    assert _fed(cal, 0.1, 0.0) is None
+    assert (cal.status, cal.reason) == ("no_anchor", "run_too_short")
     assert _fed(cal, 0.7, 0.0) == pytest.approx(syn.W_REAL, rel=1e-6)
+    assert (cal.status, cal.reason, cal.hold_frames) == ("measured", None, 0)
+
+
+def test_calibrator_holds_for_the_rest_of_the_sequence():
+    """A rejected frame reuses the last measured width however far back it
+    was measured — and reports how far back that is."""
+    cal = NearfieldWidthCalibrator(syn.F_X, syn.F_Y, syn.IMG_H, syn.CAM_H)
+    _fed(cal, 0.0, 0.0)
+    _fed(cal, 0.7, 0.0)                                     # adopted here
     # grade knee at the camera (road_points pitches away from the support
     # plane at z=0): the near-field fit is no longer a straight w(z) trend, so
     # the quality gate rejects it — hold the adopted value
-    held = _fed(cal, 1.0, 8.0)
-    assert held == pytest.approx(syn.W_REAL, rel=1e-6)
-    assert cal.last_estimate["quality_ok"] is False
-    # still rejected past MAX_HOLD metres: the patch is behind us, fall back
-    assert _fed(cal, 0.7 + 5.5, 8.0) == pytest.approx(3.5)
+    assert _fed(cal, 1.0, 8.0) == pytest.approx(syn.W_REAL, rel=1e-6)
+    assert (cal.status, cal.reason) == ("held", "quality_gate")
+    # far past the old hold bound (the window's far edge): still held
+    assert _fed(cal, 200.0, 8.0) == pytest.approx(syn.W_REAL, rel=1e-6)
+    assert cal.status == "held"
+    assert cal.hold_frames == 2
+    assert cal.hold_m == pytest.approx(199.3)
+
+
+def test_a_run_survives_one_failed_frame():
+    """A near field that flickers (OpenLane 17612: every other frame without
+    rows) still completes a run — one failure is a dropped observation."""
+    cal = NearfieldWidthCalibrator(syn.F_X, syn.F_Y, syn.IMG_H, syn.CAM_H)
+    _fed(cal, 0.0, 0.0)                              # run starts
+    _fed(cal, 0.5, 0.0, z_near=8.0)                  # one frame without rows
+    assert _fed(cal, 1.0, 0.0) == pytest.approx(syn.W_REAL, rel=1e-6)
+    assert cal.status == "measured"
+
+
+def test_two_failed_frames_break_the_run():
+    cal = NearfieldWidthCalibrator(syn.F_X, syn.F_Y, syn.IMG_H, syn.CAM_H)
+    _fed(cal, 0.0, 0.0)
+    _fed(cal, 0.3, 0.0, z_near=8.0)
+    _fed(cal, 0.6, 0.0, z_near=8.0)                  # second failure in a row
+    assert _fed(cal, 1.0, 0.0) is None               # run restarted here
+    assert cal.reason == "run_too_short"
+
+
+def test_without_odometry_the_run_counts_frames():
+    cal = NearfieldWidthCalibrator(syn.F_X, syn.F_Y, syn.IMG_H, syn.CAM_H)
+    good, bad = _curves(0.0, 2.0, 30.0), _curves(0.0, 8.0, 30.0)
+    assert cal.update(*good) is None
+    assert cal.update(*bad) is None
+    assert cal.update(*bad) is None                  # two failures: run broken
+    assert cal.update(*good) is None
+    assert cal.update(*good) == pytest.approx(syn.W_REAL, rel=1e-6)
 
 
 def test_calibrator_ignores_an_isolated_gate_pass():
     """One clean-looking frame between rejects (curvature inflection) must
     not be adopted — the θ0 gate is blind exactly there."""
-    cal = NearfieldWidthCalibrator(syn.F_X, syn.F_Y, syn.IMG_H, syn.CAM_H,
-                                   w_real_fallback=3.5)
+    cal = NearfieldWidthCalibrator(syn.F_X, syn.F_Y, syn.IMG_H, syn.CAM_H)
     _fed(cal, 0.0, 8.0)
     _fed(cal, 0.2, 0.0)          # isolated pass: run restarts, span 0 m
-    assert _fed(cal, 0.4, 8.0) == pytest.approx(3.5)
+    assert _fed(cal, 0.4, 8.0) is None
+    assert cal.status == "no_anchor"
+
+
+def test_a_lone_image_uses_its_own_measurement():
+    """sequence=False (single-image inference): no run to wait for."""
+    cal = NearfieldWidthCalibrator(syn.F_X, syn.F_Y, syn.IMG_H, syn.CAM_H,
+                                   sequence=False)
+    assert cal.update(*_curves(0.0, 2.0, 30.0)) == pytest.approx(
+        syn.W_REAL, rel=1e-6)
+    assert cal.status == "measured" and cal.hold_m is None
+    lone = NearfieldWidthCalibrator(syn.F_X, syn.F_Y, syn.IMG_H, syn.CAM_H,
+                                    sequence=False)
+    assert lone.update(*_curves(0.0, 8.0, 30.0)) is None
+    assert lone.reason == "no_nearfield_rows"
+
+
+def test_last_resort_only_before_the_first_measurement():
+    """The constant stands in only while the sequence has measured nothing,
+    and says so; once measured, a failing frame holds the measurement."""
+    cal = NearfieldWidthCalibrator(syn.F_X, syn.F_Y, syn.IMG_H, syn.CAM_H)
+    unreachable = _curves(0.0, 8.0, 30.0)         # nothing in the near window
+    cal.advance_to(0.0)
+    assert resolve_lane_width(cal, *unreachable, 3.5) == (3.5, "last_resort")
+    cal.advance_to(0.1)
+    resolve_lane_width(cal, *_curves(0.0, 2.0, 30.0), 3.5)
+    cal.advance_to(0.7)
+    w, status = resolve_lane_width(cal, *_curves(0.0, 2.0, 30.0), 3.5)
+    assert status == "measured" and w == pytest.approx(syn.W_REAL, rel=1e-6)
+    cal.advance_to(50.0)
+    w, status = resolve_lane_width(cal, *unreachable, 3.5)
+    assert status == "held" and w == pytest.approx(syn.W_REAL, rel=1e-6)
+
+
+def test_no_last_resort_means_no_width():
+    cal = NearfieldWidthCalibrator(syn.F_X, syn.F_Y, syn.IMG_H, syn.CAM_H)
+    assert resolve_lane_width(cal, *_curves(0.0, 8.0, 30.0)) == (None, "no_anchor")
 
 
 def test_declines_on_crossed_curves():

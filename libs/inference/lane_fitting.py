@@ -47,7 +47,8 @@ _REFINE_MIN_GRAD = 4.0
 def inner_chain_points(segments, is_left, return_debug=False):
     """Clean inner-lane-line points for one side, from tracked segments.
 
-    w_real (3.25 m in config) is the INNER-edge-to-inner-edge lane width, but
+    The lane width (measured per frame in pitch_estimation) is INNER-edge-to-
+    inner-edge, but
     the lane tracker deliberately keeps the whole marking group (all parallel paint
     edges — evidence for tracking). This function recovers the measurement
     semantics downstream:
@@ -244,7 +245,16 @@ def refine_inner_points(image_rgb, points, is_left):
 # photometric gate cannot: REAL paint beyond the crest that is simply not
 # the same continuous lane line. Zero false triggers on all sampled normal
 # frames with these gates.
-_ZJUMP_ABS_M = 3.0    # minimum jump that can never be continuous road
+#
+# Depth is measured in LANE WIDTHS (z/w_real = f_x/width), so the guard needs
+# no lane width (stage C, 2026-09-18): the relative gate and the extrapolation
+# test are ratios of depths and do not care about the unit. Only the absolute
+# floor did — it was 3.0 m, tuned with w_real = 3.25, and is carried over as
+# 3.0/3.25 lane widths so the guard behaves exactly as before on that road. On
+# a 4.4 m lane the floor is now 4.1 m: the jump a continuous road can make per
+# paired row scales with how far apart the lines are in the image, which is
+# set by the width, so a width-relative floor is the better guess anyway.
+_ZJUMP_ABS_LANES = 3.0 / 3.25   # minimum jump that can never be continuous road
 _ZJUMP_FRAC = 0.3     # relative gate: dz > 0.3*z at larger depths
 # Continuous-road bound across a ROW GAP: extrapolating the local plane
 # (height matched at the near pair) to the far row gives the depth a
@@ -255,12 +265,13 @@ _ZJUMP_FRAC = 0.3     # relative gate: dz > 0.3*z at larger depths
 _ZJUMP_EXTRAP_FACTOR = 1.5
 
 
-def truncate_at_depth_jump(left_points, right_points, f_x, w_real, image_height):
+def truncate_at_depth_jump(left_points, right_points, f_x, image_height):
     """Cut BOTH chains at the first paired-row depth jump (crest occlusion).
 
-    Rows where both chains have a point give independent per-row depths;
-    walking near to far, a jump that exceeds BOTH the continuity gate
-    max(_ZJUMP_ABS_M, _ZJUMP_FRAC*z) AND _ZJUMP_EXTRAP_FACTOR times the
+    Rows where both chains have a point give independent per-row depths, in
+    lane widths (see _ZJUMP_ABS_LANES); walking near to far, a jump that
+    exceeds BOTH the continuity gate
+    max(_ZJUMP_ABS_LANES, _ZJUMP_FRAC*z) AND _ZJUMP_EXTRAP_FACTOR times the
     local-plane extrapolation marks a hidden interval — everything beyond
     belongs to a disconnected road section and must not be joined to the
     near chain (lane_curve would bridge it). Both chains keep only rows at
@@ -274,13 +285,13 @@ def truncate_at_depth_jump(left_points, right_points, f_x, w_real, image_height)
     cy = image_height / 2.0
     xl = {int(round(y)): x for x, y in lp}
     xr = {int(round(y)): x for x, y in rp}
-    pairs = []                                    # (row, z), near first
+    pairs = []                                    # (row, z in lane widths), near first
     for y in sorted(set(xl) & set(xr), reverse=True):
         width = xr[y] - xl[y]
         if width > 0:
-            pairs.append((y, f_x * w_real / width))
+            pairs.append((y, f_x / width))
     for (y1, z1), (y2, z2) in zip(pairs, pairs[1:]):
-        if z2 - z1 <= max(_ZJUMP_ABS_M, _ZJUMP_FRAC * z1):
+        if z2 - z1 <= max(_ZJUMP_ABS_LANES, _ZJUMP_FRAC * z1):
             continue
         if y2 - cy <= 1e-6:
             continue      # far row at/above the local horizon: no bound, stay put

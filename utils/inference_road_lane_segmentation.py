@@ -13,7 +13,8 @@ from libs.inference.lane_fitting import (inner_chain_points, refine_inner_points
                                          lane_curve, truncate_at_depth_jump)
 from libs.inference.paint_evidence import filter_paint_segments, truncate_at_evidence_break
 from libs.visualization.lane_visualization import draw_lane_curves
-from libs.inference.pitch_estimation import estimate_pitch_from_curves
+from libs.inference.pitch_estimation import (estimate_pitch_from_curves, NearfieldWidthCalibrator,
+                                             resolve_lane_width)
 from libs.visualization.pitch_visualization import plot_pitch_profile, plot_y3d_profile, save_pitch_estimation_steps
 from libs.road_profile_gt import load_profile_gt
 
@@ -34,8 +35,8 @@ num_samples = config["lane_fitting"]["num_samples"]
 samples_per_meter = config["lane_fitting"].get("samples_per_meter")
 f_x = config["pitch_estimation"]["f_x"]
 f_y = config["pitch_estimation"]["f_y"]
-w_real = config["pitch_estimation"]["w_real"]
 camera_height    = config["pitch_estimation"].get("camera_height")
+last_resort_lane_width = config["pitch_estimation"].get("last_resort_lane_width")
 camera_offset_m  = config["pitch_estimation"].get("camera_forward_offset", 0.0)
 gt_height_source = config.get("ground_truth", {}).get("height_source", "auto")
 pitch_method     = config["pitch_estimation"].get("method", "windowed")
@@ -102,7 +103,7 @@ def main():
     right_points = truncate_at_evidence_break(
         resized_image, right_points, False, f_x, f_y, camera_height)
     left_points, right_points = truncate_at_depth_jump(
-        left_points, right_points, f_x, w_real, resized_image.height)
+        left_points, right_points, f_x, resized_image.height)
     left_curve = lane_curve(left_points)
     right_curve = lane_curve(right_points)
     t4 = time.perf_counter()
@@ -110,18 +111,33 @@ def main():
     """
     Pitch estimation
     """
-    pitch_curve = estimate_pitch_from_curves(
-        left_curve, right_curve, f_x, f_y, resized_image.height, w_real,
-        num_samples=num_samples, samples_per_meter=samples_per_meter,
-        method=pitch_method)
-    widths = pitch_curve["widths"]
-    zs, ps = pitch_curve["z_samples"], pitch_curve["pitch_samples"]
-    if len(zs) == 0:
-        print("pitch: (degenerate — no valid depth range)")
+    # 車道寬由近場量測（單張沒有前後幀可沿用）；量不到才用 config 的
+    # last_resort_lane_width 並明白標出，沒設就不輸出 pitch
+    calibrator = NearfieldWidthCalibrator(f_x, f_y, resized_image.height,
+                                          camera_height, sequence=False)
+    w_real, w_status = resolve_lane_width(
+        calibrator, left_curve, right_curve, last_resort_lane_width)
+    pitch_curve = None
+    if w_status == "last_resort":
+        print(f"lane width: not measurable ({calibrator.reason}) — "
+              f"LAST RESORT {w_real:.3f} m (assumed, not measured)")
+    elif w_real is not None:
+        print(f"lane width (near field): {w_real:.3f} m")
+    if w_real is None:
+        print(f"lane width: not measurable ({calibrator.reason}) — no pitch output")
     else:
-        step = max(1, len(zs) // 10)
-        for z, theta in zip(zs[::step], ps[::step]):
-            print(f"  z={z:.1f}m  pitch={theta:.2f}°")
+        pitch_curve = estimate_pitch_from_curves(
+            left_curve, right_curve, f_x, f_y, resized_image.height, w_real,
+            num_samples=num_samples, samples_per_meter=samples_per_meter,
+            method=pitch_method)
+        widths = pitch_curve["widths"]
+        zs, ps = pitch_curve["z_samples"], pitch_curve["pitch_samples"]
+        if len(zs) == 0:
+            print("pitch: (degenerate — no valid depth range)")
+        else:
+            step = max(1, len(zs) // 10)
+            for z, theta in zip(zs[::step], ps[::step]):
+                print(f"  z={z:.1f}m  pitch={theta:.2f}°")
     t5 = time.perf_counter()
 
     print(f"road segmentation:   {(t1-t0)*1000:.1f} ms")
@@ -131,7 +147,9 @@ def main():
     print(f"pitch estimation:    {(t5-t4)*1000:.1f} ms")
 
     gt, frame_id = None, None
-    if not measurements_csv.exists():
+    if pitch_curve is None:
+        pass                                  # no pitch to score or plot
+    elif not measurements_csv.exists():
         print(f"GT: skipped (no {measurements_csv})")
     else:
         frame_id = int(Path(image_path).stem)
@@ -169,6 +187,8 @@ def main():
     steps_dir = save_lane_fitting_steps(resized_image, inner_left, inner_right,
                                         "outputs/lane_fit_step")
     print(f"lane fitting steps: {steps_dir}")
+    if pitch_curve is None:
+        return
     steps_dir = save_pitch_estimation_steps(
         resized_image, left_curve, right_curve, pitch_curve,
         f_x, f_y, resized_image.height, w_real, "outputs/pitch_est_step",

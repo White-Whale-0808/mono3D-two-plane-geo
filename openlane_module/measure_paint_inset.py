@@ -227,7 +227,7 @@ def run_carla(args):
             dbg = infer_one(model, str(img_path), mo['device'], resize,
                             cfg['line_segmentation']['min_segment_length_near'],
                             cfg['line_segmentation']['min_segment_length_far'],
-                            lf['num_samples'], f_x, f_y, pe['w_real'], cam_h,
+                            lf['num_samples'], f_x, f_y, cam_h,
                             samples_per_meter=lf.get('samples_per_meter'),
                             track_bands=cfg['lane_segmentation'].get('track_bands', 16),
                             method=pe.get('method', 'windowed'),
