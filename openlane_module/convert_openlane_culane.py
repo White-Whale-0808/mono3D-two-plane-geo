@@ -19,12 +19,14 @@ CULane loader 讀 ``list/train_gt.txt``；train split 的輸出檔名正好是�
       attribute，見 reference 記憶／WWH-25）不輸出。
     * 影像範圍外的點丟掉、重複點去掉；少於 2 點的線丟掉。
     * 影像不縮放、不裁切：解析度與 cut_height 是訓練設定的事，不是資料的事。
-    * 空標籤幀（沒有 attribute 1–4 的線）依原因分類，見 frame_kind。預設**排除**
-      ``ego_unlabelled``（自車道旁有漆線卻沒標位置：訓練會教模型「這條真的線不用畫」，
-      驗證集 2.7%），其餘保留——只有路緣／完全沒線／漆線都在遠處，是教模型
-      「這裡不要畫」的有效負樣本。``--keep-ego-unlabelled`` 放回。``--stats-only``
-      只統計不輸出（驗證集 42.7% 空：路緣 19.3%、沒線 9.2%、遠處漆線約 11.4%、
-      自車道旁未標 2.7%）。
+    * 空標籤幀（沒有 attribute 1–4 的線）依原因分類，見 frame_kind。``--stats-only``
+      只統計不輸出（驗證集 42.7% 空：路緣 19.3%、沒線 9.2%、遠處漆線 11.4%、
+      自車道位置上有漆線但沒標 2.7%）。預設排除 ``ego_unlabelled``，
+      ``--keep-ego-unlabelled`` 放回。
+      ⚠ 它**不是漏標**：驗證集 96% 帶官方「路口」標籤（far_paint 也是 96%，
+      有標註的幀只有 33%），也就是 OpenLane 的慣例——車子在路口裡時不定義
+      自車道。起初把它當漏標才預設排除；正式訓練前要決定是否改成保留，
+      與同樣在路口的 far_paint 一致（WWH-25，2026-09-25）。
     * ``--extend-bottom``：OpenLane 標註通常從 8–14 m 才開始（光達＋未來軌跡），
       影像底部那段看得到卻沒標。這個選項把每條線依最近那段直線延伸到底部，
       跟 CULane 的標註習慣一致（見 extend_to_bottom）。預設**不延伸**；
@@ -188,7 +190,7 @@ def main(argv=None):
     ap.add_argument('--mask-width', type=int, default=MASK_WIDTH_PX)
     ap.add_argument('--skip-empty', action='store_true', help='不輸出任何沒有 attribute 1–4 車道線的幀')
     ap.add_argument('--keep-ego-unlabelled', action='store_true',
-                    help='保留「自車道旁有漆線卻沒標位置」的幀（預設排除，見 frame_kind）')
+                    help='保留 ego_unlabelled 幀（自車道位置上有漆線但沒標；96%% 在路口，見 frame_kind）')
     ap.add_argument('--stats-only', action='store_true',
                     help='只統計各類幀數（frame_kind），不讀影像、不輸出')
     ap.add_argument('--extend-bottom', action='store_true',
