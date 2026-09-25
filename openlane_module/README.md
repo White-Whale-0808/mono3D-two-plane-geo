@@ -21,7 +21,7 @@ pipeline 與 GT 模組**一行未改** —— 相容性全部在轉換器裡解�
 | `export_updown.py` | 官方「上下坡」標籤（`test/1000_updown.txt`，5,518 幀 / 33 段）**不篩選**全部轉出；轉換器會踢掉的原因寫進 `drop_reasons` 欄，剖面只用漆線算（路緣不當路面高度）。另出 `index.csv`（逐段）與 `frames.csv`（逐幀） |
 | `select_updown.py` | 從上面的輸出挑片段：去掉大部分是路緣（無漆線幀 ≥ 50%）與只有單邊（兩側漆線幀 < 25%）的段，以目錄連結放進新根目錄，不複製影像 |
 | `select_updown_straight.py` | 同一份輸出**逐幀**篩：兩側內側線都是漆線（轉換器收錄條件）、50 m 內 sagitta ≤ 0.15 m（Tier A 門檻）、非夜間、非路口（官方 tag，`--keep-night` / `--keep-intersection` 放回）。frame_id 重編、`collect_dist_m` 保留，影像用硬連結。2026-09-24：留下 ≥10 幀的 8 段 221 幀、38 個連續 run |
-| `convert_openlane_culane.py` | OpenLane 2D 標註（`uv`）→ CULane 格式（`.lines.txt`＋分割遮罩＋`list/<split>_gt.txt`），給 CLRNet 等 2D 偵測器訓練／評估（WWH-25）。只收 `attribute` 1–4（左左／左／右／右右），路緣從不帶 attribute 所以自動排除；影像硬連結、不縮放不裁切。⚠ OpenLane 標註通常沒延伸到影像底部（從 8–14 m 才開始）；`--extend-bottom` 把每條線依最近那段直線延伸到底部（CULane 的標註習慣），預設不延伸，微調時兩種都試 |
+| `convert_openlane_culane.py` | OpenLane 2D 標註（`uv`）→ CULane 格式（`.lines.txt`＋分割遮罩＋`list/<split>_gt.txt`），給 CLRNet 等 2D 偵測器訓練／評估（WWH-25）。只收 `attribute` 1–4（左左／左／右／右右），路緣從不帶 attribute 所以自動排除；影像硬連結、不縮放不裁切。⚠ OpenLane 標註通常沒延伸到影像底部（從 8–14 m 才開始）；`--extend-bottom` 把每條線依最近那段直線延伸到底部（CULane 的標註習慣），預設不延伸，微調時兩種都試。空標籤幀依原因分類（`frame_kind`；`--stats-only` 只統計）：驗證集 42.7% 空（路緣 19.3%、沒線 9.2%、遠處漆線 11.4%、自車道旁有漆卻沒標 2.7%），預設只排除最後一類 |
 
 全部從 repo 根目錄執行，預設讀 `D:/datasets/openlane`：
 

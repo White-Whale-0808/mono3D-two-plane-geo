@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from openlane_module.convert_openlane_culane import (EXTEND_STEP_PX, lanes_to_culane,
+from openlane_module.convert_openlane_culane import (EXTEND_STEP_PX, frame_kind, lanes_to_culane,
                                                      lines_txt, mask_png)
 
 W, H = 1920, 1280
@@ -53,6 +53,25 @@ def test_extend_bottom_off_by_default():
     vs = np.arange(500.0, 801.0, 10.0)
     pts = lanes_to_culane([_lane(2, 1000 - 0.5 * (vs - 800), vs)], W, H)[2]
     assert pts[0, 1] == 800
+
+
+def _lane3d(attr, category, lateral_m, z0=5.0, z1=40.0):
+    z = np.linspace(z0, z1, 20)
+    return {'attribute': attr, 'category': category,
+            'xyz': [list(z), [lateral_m] * 20, [0.0] * 20],
+            'uv': [[900.0, 950.0], [1200.0, 900.0]]}
+
+
+def test_frame_kind():
+    assert frame_kind([], W, H) == 'no_lanes'
+    assert frame_kind([_lane3d(2, 1, 1.7)], W, H) == 'labelled'
+    assert frame_kind([_lane3d(0, 21, 1.7)], W, H) == 'curb_only'
+    # an unlabelled paint line where an ego line would be
+    assert frame_kind([_lane3d(0, 1, -1.6)], W, H) == 'ego_unlabelled'
+    # unlabelled paint lines only far ahead or far to the side
+    assert frame_kind([_lane3d(0, 1, 1.6, z0=29.0), _lane3d(0, 2, 6.0)], W, H) == 'far_paint'
+    off = _lane3d(3, 1, 1.7); off['uv'] = [[-50.0, -10.0], [1200.0, 900.0]]
+    assert frame_kind([off], W, H) == 'out_of_image'
 
 
 def test_lines_txt_and_mask_values():

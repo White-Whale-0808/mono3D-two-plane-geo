@@ -19,6 +19,12 @@ CULane loader 讀 ``list/train_gt.txt``；train split 的輸出檔名正好是�
       attribute，見 reference 記憶／WWH-25）不輸出。
     * 影像範圍外的點丟掉、重複點去掉；少於 2 點的線丟掉。
     * 影像不縮放、不裁切：解析度與 cut_height 是訓練設定的事，不是資料的事。
+    * 空標籤幀（沒有 attribute 1–4 的線）依原因分類，見 frame_kind。預設**排除**
+      ``ego_unlabelled``（自車道旁有漆線卻沒標位置：訓練會教模型「這條真的線不用畫」，
+      驗證集 2.7%），其餘保留——只有路緣／完全沒線／漆線都在遠處，是教模型
+      「這裡不要畫」的有效負樣本。``--keep-ego-unlabelled`` 放回。``--stats-only``
+      只統計不輸出（驗證集 42.7% 空：路緣 19.3%、沒線 9.2%、遠處漆線約 11.4%、
+      自車道旁未標 2.7%）。
     * ``--extend-bottom``：OpenLane 標註通常從 8–14 m 才開始（光達＋未來軌跡），
       影像底部那段看得到卻沒標。這個選項把每條線依最近那段直線延伸到底部，
       跟 CULane 的標註習慣一致（見 extend_to_bottom）。預設**不延伸**；
@@ -52,6 +58,13 @@ MASK_WIDTH_PX = 16            # CULane laneseg_label_w16 (its own images are 164
 EXTEND_FIT_FRAC = 0.2
 EXTEND_MIN_PTS = 5
 EXTEND_STEP_PX = 10
+CURB = (20, 21)
+# ego_unlabelled: an attribute-0 paint line within this lateral distance (m) of
+# the camera somewhere 5-20 m ahead — i.e. where an ego line would be. Half a
+# 3.5 m lane plus margin; the near range is where the labels normally exist.
+EGO_LAT_M = 2.5
+EGO_Z_RANGE_M = (5.0, 20.0)
+SRC_W, SRC_H = 1920, 1280      # OpenLane front camera (--stats-only reads no images)
 
 
 def lanes_to_culane(lane_lines, width, height, extend_bottom=False):
@@ -73,6 +86,35 @@ def lanes_to_culane(lane_lines, width, height, extend_bottom=False):
         pts = pts[np.argsort(-pts[:, 1])]            # CULane: bottom of the image first
         out[slot] = extend_to_bottom(pts, width, height) if extend_bottom else pts
     return out
+
+
+def frame_kind(lane_lines, width, height):
+    """Why a frame has (or lacks) attribute-1..4 labels:
+
+    labelled        at least one attribute-1..4 lane inside the image
+    out_of_image    attribute-1..4 lanes exist but none inside the image
+    no_lanes        no lane annotation at all
+    curb_only       only curbs (category 20/21)
+    ego_unlabelled  an attribute-0 PAINT line beside the ego position
+                    (|lateral| ≤ EGO_LAT_M somewhere in EGO_Z_RANGE_M ahead)
+    far_paint       attribute-0 paint lines, none beside the ego position
+    """
+    if lanes_to_culane(lane_lines, width, height):
+        return 'labelled'
+    if any(ln.get('attribute', 0) in SLOTS for ln in lane_lines):
+        return 'out_of_image'
+    if not lane_lines:
+        return 'no_lanes'
+    paint = [ln for ln in lane_lines if ln.get('category') not in CURB]
+    if not paint:
+        return 'curb_only'
+    lo, hi = EGO_Z_RANGE_M
+    for ln in paint:
+        xyz = np.asarray(ln['xyz'], dtype=np.float64)   # [forward, lateral, up], as inner_pair
+        m = (xyz[0] >= lo) & (xyz[0] <= hi)
+        if m.any() and np.abs(xyz[1][m]).min() <= EGO_LAT_M:
+            return 'ego_unlabelled'
+    return 'far_paint'
 
 
 def extend_to_bottom(pts, width, height, frac=EXTEND_FIT_FRAC, step=EXTEND_STEP_PX):
@@ -144,7 +186,11 @@ def main(argv=None):
     ap.add_argument('--split', default='validation', help='training 或 validation')
     ap.add_argument('--out', type=Path, default=Path('D:/datasets/openlane_culane'))
     ap.add_argument('--mask-width', type=int, default=MASK_WIDTH_PX)
-    ap.add_argument('--skip-empty', action='store_true', help='不輸出沒有 attribute 1–4 車道線的幀')
+    ap.add_argument('--skip-empty', action='store_true', help='不輸出任何沒有 attribute 1–4 車道線的幀')
+    ap.add_argument('--keep-ego-unlabelled', action='store_true',
+                    help='保留「自車道旁有漆線卻沒標位置」的幀（預設排除，見 frame_kind）')
+    ap.add_argument('--stats-only', action='store_true',
+                    help='只統計各類幀數（frame_kind），不讀影像、不輸出')
     ap.add_argument('--extend-bottom', action='store_true',
                     help='每條線依最近那段直線延伸到影像底部（OpenLane 近處沒標註，見 extend_to_bottom）')
     ap.add_argument('--limit-segments', type=int, default=0, help='只轉前 N 段（冒煙測試）')
@@ -156,6 +202,22 @@ def main(argv=None):
         segs = [p for p in segs if p.name in set(a.segment)]
     if a.limit_segments:
         segs = segs[:a.limit_segments]
+    kinds = {}
+    if a.stats_only:
+        for i, seg in enumerate(segs):
+            for js in sorted(seg.glob('*.json')):
+                if not js.name.startswith('._'):
+                    k = frame_kind(json.loads(js.read_text(encoding='utf-8'))['lane_lines'],
+                                   SRC_W, SRC_H)
+                    kinds[k] = kinds.get(k, 0) + 1
+            if i % 100 == 0:
+                print(f'[{i}/{len(segs)}]', flush=True)
+        n = sum(kinds.values())
+        print(f'{n} frames, {len(segs)} segments ({a.split}):')
+        for k, v in sorted(kinds.items(), key=lambda kv: -kv[1]):
+            print(f'  {k:15s} {v:7d}  {v / n:6.1%}')
+        return
+
     (a.out / 'list').mkdir(parents=True, exist_ok=True)
     listing, n_img, n_missing, n_empty, per_slot = [], 0, 0, 0, dict.fromkeys(SLOTS, 0)
     for i, seg in enumerate(segs):
@@ -165,6 +227,10 @@ def main(argv=None):
             if js.name.startswith('._'):
                 continue
             data = json.loads(js.read_text(encoding='utf-8'))
+            kind = frame_kind(data['lane_lines'], SRC_W, SRC_H)
+            kinds[kind] = kinds.get(kind, 0) + 1
+            if kind == 'ego_unlabelled' and not a.keep_ego_unlabelled:
+                continue
             src_img = a.openlane / data['file_path']
             if not src_img.exists():
                 n_missing += 1
@@ -192,6 +258,8 @@ def main(argv=None):
     print(f'{n_img} images from {len(segs)} segments -> {a.out}  '
           f'(list/{list_name}; no image file {n_missing}; no attribute-1..4 lane {n_empty}'
           f'{" skipped" if a.skip_empty else " kept"}; lanes per slot {per_slot})')
+    print(f'frame kinds (before skipping): {kinds}'
+          f'{"" if a.keep_ego_unlabelled else "  (ego_unlabelled skipped)"}')
 
 
 if __name__ == '__main__':

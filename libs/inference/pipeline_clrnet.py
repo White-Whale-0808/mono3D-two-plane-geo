@@ -92,6 +92,7 @@ def infer_one_clrnet(
     f_x, f_y, camera_height,
     *,
     cut_frac: float,
+    detector_mode: str = "culane",
     tail: str = "keep",
     refine: str = "none",
     nearfield_source: str = "paint",
@@ -111,6 +112,11 @@ def infer_one_clrnet(
         Share of the image top cropped before the detector, as it was trained
         (CULane: 270/590). Step 1 measured that running uncropped LOSES lines
         (86 % -> 66.5 % on OpenLane updown_straight), so keep the training value.
+    detector_mode
+        lane_detector preprocessing: "culane" (pad to CULane's aspect — the
+        released weights) or "naive" (stretch the cropped image to the network
+        input — how CLRNet itself trains, so use it for fine-tuned weights).
+        Must match how the weights were trained, as must cut_frac.
     tail
         "keep" or "last_paint" — see model_lane_fitting.apply_tail.
     refine
@@ -139,7 +145,7 @@ def infer_one_clrnet(
     rgb = np.asarray(image)
     H, W = rgb.shape[:2]
 
-    lanes, conf = detector(rgb, f_x, f_y, cut=int(round(cut_frac * H)))
+    lanes, conf = detector(rgb, f_x, f_y, cut=int(round(cut_frac * H)), mode=detector_mode)
     left, right, y_pick_l, y_pick_r = pick_ego(lanes, W)
     guard = "off"
     if ego_guard:

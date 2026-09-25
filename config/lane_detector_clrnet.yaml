@@ -12,6 +12,13 @@ clrnet:
   # LOSES lines (OpenLane updown_straight 86.0 % -> 66.5 %, Town05 95.4 % ->
   # 77.0 %) — the network has never seen the top of an image.
   cut_frac: 0.457627         # 270 / 590
+  # Preprocessing and network input size — must match how the weights were
+  # trained. Released CULane weights: culane, 800x320. A fine-tune trained by
+  # CLRNet's own pipeline: naive, and its cut_height / img_w / img_h.
+  mode: culane
+  img_w: 800
+  img_h: 320
+  # weights: null            # null: $CLRNET_WEIGHTS or $CLRNET_ROOT/culane_dla34.pth
 
 fitting:
   # Rows beyond the farthest verified paint row: "keep" (detector position,

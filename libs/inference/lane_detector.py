@@ -124,7 +124,10 @@ def _install_stubs():
 
 
 class CLRNet:
-    def __init__(self, weights=None, device='cuda', conf=0.4):
+    def __init__(self, weights=None, device='cuda', conf=0.4, img_w=IMG_W, img_h=IMG_H):
+        """img_w / img_h: the network input size the weights were trained at —
+        800×320 for the CULane release; a fine-tune may use another (WWH-25)."""
+        self.img_w, self.img_h = int(img_w), int(img_h)
         _install_stubs()
         sys.path.insert(0, str(CLRNET_ROOT))
         from addict import Dict
@@ -139,7 +142,7 @@ class CLRNet:
             neck=dict(type='FPN', in_channels=[128, 256, 512], out_channels=64,
                       num_outs=3, attention=False),
             test_parameters=dict(conf_threshold=conf, nms_thres=50, nms_topk=4),
-            img_w=IMG_W, img_h=IMG_H, ori_img_w=1640, ori_img_h=590, cut_height=270,
+            img_w=self.img_w, img_h=self.img_h, ori_img_w=1640, ori_img_h=590, cut_height=270,
             num_classes=5, ignore_label=255, bg_weight=0.4,
             iou_loss_weight=2., cls_loss_weight=2., xyt_loss_weight=0.2, seg_loss_weight=1.))
         cfg.haskey = lambda k: k in cfg
@@ -164,32 +167,32 @@ class CLRNet:
         未經 softmax；只用來排序／比較，門檻是建構時的 conf）。"""
         H, W = img_rgb.shape[:2]
         crop = cv2.cvtColor(img_rgb[cut:], cv2.COLOR_RGB2BGR).astype(np.float32)
-        sy = IMG_H / (H - cut)
+        sy = self.img_h / (H - cut)
         if mode == 'naive':
-            sx, x0 = IMG_W / W, 0
-            body = cv2.resize(crop, (IMG_W, IMG_H), interpolation=cv2.INTER_AREA)
+            sx, x0 = self.img_w / W, 0
+            body = cv2.resize(crop, (self.img_w, self.img_h), interpolation=cv2.INTER_AREA)
             canvas = body
         else:
             sx = sy * CULANE_FXFY * f_y / f_x
             new_w = int(round(W * sx))
-            body = cv2.resize(crop, (new_w, IMG_H), interpolation=cv2.INTER_AREA)
-            canvas = np.tile(MEAN_BGR, (IMG_H, IMG_W, 1))
-            if new_w <= IMG_W:
-                x0 = (IMG_W - new_w) // 2
+            body = cv2.resize(crop, (new_w, self.img_h), interpolation=cv2.INTER_AREA)
+            canvas = np.tile(MEAN_BGR, (self.img_h, self.img_w, 1))
+            if new_w <= self.img_w:
+                x0 = (self.img_w - new_w) // 2
                 canvas[:, x0:x0 + new_w] = body
             else:                                   # 比 800 寬就裁中間
-                c = (new_w - IMG_W) // 2
-                canvas = body[:, c:c + IMG_W]; x0 = -c
+                c = (new_w - self.img_w) // 2
+                canvas = body[:, c:c + self.img_w]; x0 = -c
         t = torch.from_numpy((canvas / 255.0).astype(np.float32).transpose(2, 0, 1)).unsqueeze(0).to(self.device)
         # CLRNet 的 head 把 y 換回 CULane 原圖座標：這裡讓它輸出「網路輸入」座標
-        self.cfg.ori_img_h, self.cfg.cut_height, self.cfg.ori_img_w = IMG_H, 0, IMG_W
+        self.cfg.ori_img_h, self.cfg.cut_height, self.cfg.ori_img_w = self.img_h, 0, self.img_w
         out = self.net(t)
         lanes = self.net.heads.get_lanes(out)[0]
         res, conf = [], []
         for ln in lanes:
             p = np.asarray(ln.points, dtype=np.float64)       # 正規化到 800×320
-            x = (p[:, 0] * IMG_W - x0) / sx
-            y = p[:, 1] * IMG_H / sy + cut
+            x = (p[:, 0] * self.img_w - x0) / sx
+            y = p[:, 1] * self.img_h / sy + cut
             ok = (x >= 0) & (x < W)
             if ok.sum() >= 2:
                 o = np.argsort(y[ok])
