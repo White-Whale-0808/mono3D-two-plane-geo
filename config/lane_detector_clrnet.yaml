@@ -1,0 +1,47 @@
+# Learned lane-detector front end (WWH-25) — read ONLY by pipeline_clrnet /
+# its runners. Camera calibration, resize and the metric stage still come from
+# inference_road_lane_segmentation.yaml; this file holds only what the new
+# front end adds.
+
+clrnet:
+  # CLRNet source + culane_dla34.pth live outside the repo: CLRNET_ROOT in the
+  # environment, default D:/models/clrnet (see libs/inference/lane_detector.py).
+  conf_threshold: 0.4        # CLRNet's own CULane test setting
+  # Top share of the image cropped before the detector, as in CULane training
+  # (270 of 590 rows). Keep it: WWH-25 step 1 measured that uncropped input
+  # LOSES lines (OpenLane updown_straight 86.0 % -> 66.5 %, Town05 95.4 % ->
+  # 77.0 %) — the network has never seen the top of an image.
+  cut_frac: 0.457627         # 270 / 590
+
+fitting:
+  # Rows beyond the farthest verified paint row: "keep" (detector position,
+  # src = model) or "last_paint" (drop them). The image cannot tell unpainted
+  # road from road hidden behind a crest; WWH-25 step 3 runs both.
+  tail: keep
+
+  # Snap paint rows to the stripe centre ("center") or keep the detector's
+  # positions ("none"). WWH-25 step 3: snapping made pitch worse at every depth.
+  refine: none
+
+  # Rows the near-field width calibrator sees: "paint" (only rows the image
+  # shows paint on) or "all". Step 3: paint-only cut the width error p90
+  # 0.59 m -> 0.23 m (OpenLane), pitch unchanged.
+  nearfield_source: paint
+
+  # Reject an ego pair whose near-field width is outside 2.5-4.5 m
+  # (model_lane_fitting.guard_ego).
+  ego_guard: true
+
+  # No pitch output beyond this depth (m, the pitch stage's own z; estimated on
+  # the full curves, output trimmed — model_lane_fitting.trim_pitch_to_depth).
+  # The pretrained CULane weights
+  # draw far road as flat: grade-change ratio k 0.55-0.64 within 20 m, 0.27 at
+  # 20-30 m, 0.09 at 30-50 m (Town05), while the estimator on ground-truth
+  # lines keeps k >= 0.96. A property of the weights - re-measure after
+  # fine-tuning; null disables.
+  max_depth_m: 20
+
+  # Width in metres the metric stage assumes before a sequence has measured
+  # one. CENTRE-to-centre for this front end: the ELSED pipeline's 3.25
+  # (inner edge to inner edge) plus one 0.125 m stripe (half on each side).
+  last_resort_lane_width: 3.375
