@@ -19,6 +19,15 @@ clrnet:
   img_w: 800
   img_h: 320
   # weights: null            # null: $CLRNET_WEIGHTS or $CLRNET_ROOT/culane_dla34.pth
+  # Load all of the above with lane_detector.CLRNet.from_config.
+  #
+  # OpenLane fine-tune, geometry B (WWH-25, chosen 2026-09-26): swap in
+  #   weights: <path to ft_B*.pth>
+  #   cut_frac: 0.0            # trained with cut_height 0
+  #   mode: naive              # CLRNet's own training preprocessing
+  #   img_w: 800
+  #   img_h: 320
+  # and re-measure fitting.max_depth_m below — it is a property of the weights.
 
 fitting:
   # Rows beyond the farthest verified paint row: "keep" (detector position,

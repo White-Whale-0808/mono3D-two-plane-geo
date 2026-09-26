@@ -160,6 +160,18 @@ class CLRNet:
         self.net = net.to(device).eval()
         self.device = device
 
+    @classmethod
+    def from_config(cls, clrnet_cfg, device='cuda'):
+        """(detector, cut_frac, mode) from the `clrnet:` block of
+        config/lane_detector_clrnet.yaml. Weights, network input size, top crop
+        and preprocessing belong together — a fine-tune only works with the
+        settings it was trained with — so they are read from one place; pass
+        cut_frac and mode on to pipeline_clrnet.infer_one_clrnet."""
+        c = clrnet_cfg
+        det = cls(weights=c.get('weights'), device=device, conf=c['conf_threshold'],
+                  img_w=c.get('img_w', IMG_W), img_h=c.get('img_h', IMG_H))
+        return det, float(c['cut_frac']), c.get('mode', 'culane')
+
     @torch.no_grad()
     def __call__(self, img_rgb, f_x, f_y, cut, mode='culane'):
         """img_rgb: H×W×3 uint8。回傳 (lanes, conf)：lanes 是 [ (N,2) ndarray (x, y)

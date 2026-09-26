@@ -21,12 +21,11 @@ CULane loader 讀 ``list/train_gt.txt``；train split 的輸出檔名正好是�
     * 影像不縮放、不裁切：解析度與 cut_height 是訓練設定的事，不是資料的事。
     * 空標籤幀（沒有 attribute 1–4 的線）依原因分類，見 frame_kind。``--stats-only``
       只統計不輸出（驗證集 42.7% 空：路緣 19.3%、沒線 9.2%、遠處漆線 11.4%、
-      自車道位置上有漆線但沒標 2.7%）。預設排除 ``ego_unlabelled``，
-      ``--keep-ego-unlabelled`` 放回。
-      ⚠ 它**不是漏標**：驗證集 96% 帶官方「路口」標籤（far_paint 也是 96%，
-      有標註的幀只有 33%），也就是 OpenLane 的慣例——車子在路口裡時不定義
-      自車道。起初把它當漏標才預設排除；正式訓練前要決定是否改成保留，
-      與同樣在路口的 far_paint 一致（WWH-25，2026-09-25）。
+      自車道位置上有漆線但沒標 2.7%）。空標籤幀**預設全部保留**。
+      ``ego_unlabelled`` **不是漏標**：驗證集 96% 帶官方「路口」標籤（far_paint
+      也是 96%，有標註的幀只有 33%），是 OpenLane 的慣例——車子在路口裡時不定義
+      自車道。保留它，模型學到「在路口裡不畫自車道線」，與同樣在路口的 far_paint
+      一致（使用者 2026-09-26 決定）。``--drop-ego-unlabelled`` 可排除。
     * ``--extend-bottom``：OpenLane 標註通常從 8–14 m 才開始（光達＋未來軌跡），
       影像底部那段看得到卻沒標。這個選項把每條線依最近那段直線延伸到底部，
       跟 CULane 的標註習慣一致（見 extend_to_bottom）。預設**不延伸**；
@@ -189,8 +188,8 @@ def main(argv=None):
     ap.add_argument('--out', type=Path, default=Path('D:/datasets/openlane_culane'))
     ap.add_argument('--mask-width', type=int, default=MASK_WIDTH_PX)
     ap.add_argument('--skip-empty', action='store_true', help='不輸出任何沒有 attribute 1–4 車道線的幀')
-    ap.add_argument('--keep-ego-unlabelled', action='store_true',
-                    help='保留 ego_unlabelled 幀（自車道位置上有漆線但沒標；96%% 在路口，見 frame_kind）')
+    ap.add_argument('--drop-ego-unlabelled', action='store_true',
+                    help='排除 ego_unlabelled 幀（自車道位置上有漆線但沒標；96%% 在路口，見 frame_kind）')
     ap.add_argument('--stats-only', action='store_true',
                     help='只統計各類幀數（frame_kind），不讀影像、不輸出')
     ap.add_argument('--extend-bottom', action='store_true',
@@ -231,7 +230,7 @@ def main(argv=None):
             data = json.loads(js.read_text(encoding='utf-8'))
             kind = frame_kind(data['lane_lines'], SRC_W, SRC_H)
             kinds[kind] = kinds.get(kind, 0) + 1
-            if kind == 'ego_unlabelled' and not a.keep_ego_unlabelled:
+            if kind == 'ego_unlabelled' and a.drop_ego_unlabelled:
                 continue
             src_img = a.openlane / data['file_path']
             if not src_img.exists():
@@ -261,7 +260,7 @@ def main(argv=None):
           f'(list/{list_name}; no image file {n_missing}; no attribute-1..4 lane {n_empty}'
           f'{" skipped" if a.skip_empty else " kept"}; lanes per slot {per_slot})')
     print(f'frame kinds (before skipping): {kinds}'
-          f'{"" if a.keep_ego_unlabelled else "  (ego_unlabelled skipped)"}')
+          f'{"  (ego_unlabelled skipped)" if a.drop_ego_unlabelled else ""}')
 
 
 if __name__ == '__main__':
